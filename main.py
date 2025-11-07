@@ -1,10 +1,9 @@
-# main.py – NO init_telegram
+# main.py – PROMPT FOR PHONE + CODE + SECRET KEY
 import asyncio
 from datetime import datetime
 from api import bingx_api_request
-from telegram import fetch_and_parse_telegram_signals, read_credentials
+from telegram import fetch_and_parse_telegram_signals, init_telegram, read_credentials, client as telegram_client
 from trade import execute_trade
-from telethon import TelegramClient
 
 # === HARD CODED START DATE ===
 START_DATE = datetime(2025, 11, 6).date()
@@ -50,11 +49,11 @@ async def main():
         'base_url': 'https://open-api.bingx.com'
     }
 
-    # === CREATE & START TELEGRAM CLIENT LOCALLY ===
+    # === INIT & START TELEGRAM (interactive code) ===
+    init_telegram(api_id, api_hash)
     try:
         print("Connecting to Telegram...")
-        telegram_client = TelegramClient('session', api_id, api_hash)
-        await telegram_client.start(phone=phone)  # Prompts for code
+        await telegram_client.start(phone=lambda: phone)  # Prompts for code
         print("Telegram connected!")
     except Exception as e:
         print(f"Telegram login failed: {e}")
@@ -74,9 +73,8 @@ async def main():
                 await asyncio.sleep(3600)
                 continue
 
-            # === PASS telegram_client TO FETCH FUNCTION ===
             signals = await fetch_and_parse_telegram_signals(
-                'credentials.txt', 'channel_details.txt', limit=10, n_signals=1, client=telegram_client
+                'credentials.txt', 'channel_details.txt', limit=10, n_signals=1
             )
 
             for signal in signals:
