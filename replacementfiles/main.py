@@ -1,4 +1,4 @@
-# main.py – FINAL: 5/DAY + 500 USDT + 20x + DAILY PnL + AUTO STOP
+# main.py – FINAL: Manual Leverage & Amount + 5/DAY + 4 TP + Daily Limits
 import asyncio
 from datetime import datetime
 from api import bingx_api_request
@@ -6,9 +6,7 @@ from bot_telegram import parse_signal, init_telegram, read_credentials
 import bot_telegram
 from trade import execute_trade
 
-# === PLAN SETTINGS ===
-USDT_PER_TRADE = 500.0
-LEVERAGE = 20
+# === DAILY SETTINGS ===
 MAX_TRADES_PER_DAY = 5
 DAILY_LOSS_LIMIT = -100.0
 DAILY_PROFIT_TARGET = 200.0
@@ -16,15 +14,13 @@ CHECK_INTERVAL = 30
 
 # === DAILY TRACKING ===
 daily_trades = 0
-daily_pnl = 0.0
 last_reset = datetime.now().date()
 
 async def reset_daily():
-    global daily_trades, daily_pnl, last_reset
+    global daily_trades, last_reset
     today = datetime.now().date()
     if today != last_reset:
         daily_trades = 0
-        daily_pnl = 0.0
         last_reset = today
         print(f"\nDaily reset: {today}")
 
@@ -38,7 +34,6 @@ async def get_total_pnl(client):
     return 0.0
 
 async def main():
-    global daily_pnl
     creds = read_credentials()
     init_telegram(creds['api_id'], creds['api_hash'])
     await bot_telegram.client.start()
@@ -49,12 +44,17 @@ async def main():
         'base_url': 'https://open-api.bingx.com'
     }
 
-    print("BOT STARTED – 500 USDT | 20x | 5/DAY | LIVE")
+    # === MANUAL INPUT ===
+    print("\n" + "="*60)
+    usdt_amount = float(input("Enter amount per trade (USDT): "))
+    leverage = int(input("Enter leverage (e.g. 20): "))
+    print("="*60 + "\n")
+
+    print(f"BOT STARTED – {usdt_amount} USDT | {leverage}x | MAX 5/DAY | LIVE\n")
 
     while True:
         await reset_daily()
 
-        # === DAILY LIMITS ===
         if daily_trades >= MAX_TRADES_PER_DAY:
             print(f"Max {MAX_TRADES_PER_DAY} trades reached. Sleeping 1h...")
             await asyncio.sleep(3600)
@@ -62,11 +62,10 @@ async def main():
 
         current_pnl = await get_total_pnl(client_bingx)
         if current_pnl <= DAILY_LOSS_LIMIT:
-            print(f"Daily loss limit reached: {current_pnl:.2f} USDT. Stopping.")
+            print(f"Daily loss limit: {current_pnl:.2f} USDT. Stopping.")
             break
         if current_pnl >= DAILY_PROFIT_TARGET:
-            print(f"Profit target hit: {current_pnl:.2f} USDT. Closing all.")
-            # Add close_all() if needed
+            print(f"Profit target: {current_pnl:.2f} USDT. Closing all.")
             break
 
         # === FETCH SIGNAL ===
@@ -85,14 +84,12 @@ async def main():
             continue
 
         print(f"\nEXECUTING TRADE {daily_trades+1}/{MAX_TRADES_PER_DAY}")
-        await execute_trade(client_bingx, new_signal, dry_run=False)
+        await execute_trade(client_bingx, new_signal, usdt_amount, leverage, dry_run=False)
         daily_trades += 1
-        daily_pnl = await get_total_pnl(client_bingx)
-        print(f"Daily PnL: {daily_pnl:.2f} USDT")
 
         await asyncio.sleep(CHECK_INTERVAL)
 
-    print("BOT STOPPED")
+    print("\nBOT STOPPED")
 
 if __name__ == '__main__':
     asyncio.run(main())
