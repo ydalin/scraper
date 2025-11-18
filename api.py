@@ -11,25 +11,33 @@ def parse_param(params_map):
 def get_sign(api_secret, payload):
     return hmac.new(api_secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
-def send_request(method, path, url_params, payload, api_key, secret_key):
+def send_request(method, path, url_params, payload, api_key, secret_key, base_url=None):
+    if base_url is None:
+        base_url = API_URL
     signature = get_sign(secret_key, url_params)
-    url = f"{API_URL}{path}?{url_params}&signature={signature}"
+    url = f"{base_url}{path}?{url_params}&signature={signature}"
     headers = {'X-BX-APIKEY': api_key}
     response = requests.request(method, url, headers=headers, data=payload)
     return response.json()
 
-async def bingx_api_request(method, endpoint, api_key, secret_key, params=None, data=None, retries=3, delay=5):
+async def bingx_api_request(method, endpoint, api_key, secret_key, base_url=None, params=None, data=None, retries=3, delay=5):
+    """Make BingX API request with proper params/data handling"""
+    if base_url is None:
+        base_url = API_URL
     for attempt in range(retries):
         try:
+            params_map = {'recvWindow': 5000}
+
+            # Merge params if provided (for GET requests)
+            if params:
+                params_map.update(params)
+
+            # Merge data if provided (for POST requests)
             if data:
-                params_map = data.copy()
-                params_map['recvWindow'] = 5000
-                url_params = parse_param(params_map)
-                return send_request(method, endpoint, url_params, None, api_key, secret_key)
-            else:
-                params_map = {'recvWindow': 5000}
-                url_params = parse_param(params_map)
-                return send_request(method, endpoint, url_params, None, api_key, secret_key)
+                params_map.update(data)
+
+            url_params = parse_param(params_map)
+            return send_request(method, endpoint, url_params, None, api_key, secret_key, base_url)
         except Exception as e:
             print(f"API request failed (attempt {attempt + 1}/{retries}): {e}")
             if attempt < retries - 1:
