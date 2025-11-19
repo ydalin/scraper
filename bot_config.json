@@ -1,5 +1,5 @@
 {
-    "usdt_per_trade": 20.0,
+    "usdt_per_trade": 50.0,
     "max_trades_per_day": 12,
     "check_interval_seconds": 10,
     "position_mode": "Cross",

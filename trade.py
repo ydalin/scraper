@@ -147,24 +147,33 @@ async def monitor_tp_and_trail_sl(client, symbol, position_side, entry, qty, tp_
                 opposite_side = 'SELL' if position_side == 'LONG' else 'BUY'
                 tp_price = target_tp['price']
                 
+                # Calculate direction-aware breakeven price with buffer
+                breakeven_buffer = 0.0005  # 0.05% buffer is enough for BingX
+                if position_side == "LONG":
+                    breakeven_price = entry * (1 + breakeven_buffer)  # slightly above entry
+                else:  # SHORT
+                    breakeven_price = entry * (1 - breakeven_buffer)  # slightly below entry
+                
                 # Conditional stop-loss: When price reaches TP, this order becomes active
-                # For LONG: stopPrice = TP (triggers when price reaches/hits TP), price = entry (protects at breakeven)
-                # Once TP is reached, if price falls back to entry, the stop-loss executes
+                # For LONG: stopPrice = TP (triggers when price reaches/hits TP), price = entry (breakeven)
+                # For SHORT: stopPrice = TP (triggers when price reaches/hits TP), price = entry (breakeven)
+                # Once TP is reached, if price moves back to entry, the stop-loss executes
                 conditional_sl_payload = {
                     'symbol': symbol,
                     'side': opposite_side,
                     'positionSide': position_side,
                     'type': 'STOP',  # Conditional limit order
                     'quantity': f"{remaining_qty:.6f}",
-                    'price': str(entry),  # Limit price (execute at entry/breakeven)
-                    'stopPrice': str(tp_price),  # Trigger price (activate when TP price is reached)
+                    'price': str(entry),  # Limit price = breakeven (execute at entry)
+                    'stopPrice': str(tp_price),  # Trigger = TP price (activate when TP is reached)
                     'timeInForce': 'GTC',
-                    'workingType': 'MARK_PRICE'
+                    'workingType': 'MARK_PRICE',
+                    'priceProtect': 'TRUE'  # Add this for safety
                 }
                 
                 print_payload(f"CONDITIONAL BREAKEVEN SL (triggers at TP{trail_tp_level})", conditional_sl_payload)
                 print(f"   Logic: When price reaches TP{trail_tp_level} ({tp_price}), this stop-loss activates")
-                print(f"   If price then falls to entry ({entry}), position closes at breakeven")
+                print(f"   If price then moves to entry ({entry}), position closes at breakeven")
                 
                 conditional_sl_resp = await bingx_api_request(
                     'POST', '/openApi/swap/v2/trade/order',
@@ -176,7 +185,7 @@ async def monitor_tp_and_trail_sl(client, symbol, position_side, entry, qty, tp_
                     conditional_sl_id = conditional_sl_resp.get('data', {}).get('order', {}).get('orderId')
                     print(f"✅ CONDITIONAL BREAKEVEN SL SET: ID = {conditional_sl_id}")
                     print(f"   Trigger: {tp_price} (TP{trail_tp_level} price)")
-                    print(f"   Execute: {entry} (entry/breakeven price)")
+                    print(f"   Execute: {entry} (breakeven/entry price)")
                     print(f"   Remaining position: {remaining_qty:.6f} ({remaining_qty/qty*100:.1f}%)")
                     print(f"   Note: Original stop-loss remains active until this triggers")
                 else:
@@ -465,18 +474,27 @@ async def execute_trade(client, signal, usdt_amount, dry_run, custom_leverage, c
             print(f"   TP trigger level: TP{trail_tp_level} @ {tp_price}")
             print(f"   Protected size after TP{trail_tp_level}: {remaining_qty:.6f} ({remaining_percent:.1f}% of original)")
 
+            # Calculate direction-aware breakeven price with buffer
+            breakeven_buffer = 0.0005  # 0.05% buffer is enough for BingX
+            if position_side == "LONG":
+                breakeven_price = entry * (1 + breakeven_buffer)  # slightly above entry
+            else:  # SHORT
+                breakeven_price = entry * (1 - breakeven_buffer)  # slightly below entry
+            
             # Conditional stop-loss: when price reaches TP, this order becomes active.
             # For LONG: stopPrice = TP (trigger), price = entry (breakeven sell limit).
+            # For SHORT: stopPrice = TP (trigger), price = entry (breakeven buy limit).
             conditional_sl_payload = {
                 'symbol': symbol,
                 'side': opposite_side,
                 'positionSide': position_side,
                 'type': 'STOP',  # Conditional limit order
                 'quantity': f"{remaining_qty:.6f}",
-                'price': str(entry),       # execute at entry/breakeven
-                'stopPrice': str(tp_price),  # trigger when TP price is reached
+                'price': str(entry),  # Limit price = breakeven (execute at entry)
+                'stopPrice': str(tp_price),  # Trigger = TP price (activate when TP is reached)
                 'timeInForce': 'GTC',
-                'workingType': 'MARK_PRICE'
+                'workingType': 'MARK_PRICE',
+                'priceProtect': 'TRUE'  # Add this for safety
             }
 
             print_payload(f"CONDITIONAL BREAKEVEN SL (placed immediately for TP{trail_tp_level})", conditional_sl_payload)
