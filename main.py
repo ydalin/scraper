@@ -1,13 +1,38 @@
 # main.py – FINAL ×10 VERSION
 import asyncio
 from datetime import datetime
+import getpass
 from api import bingx_api_request
 from bot_telegram import parse_signal
 from trade import execute_trade
 from config import get_config
 
 config = get_config()
-client_bingx = {'api_key': 'YOUR_KEY', 'secret_key': 'YOUR_SECRET', 'base_url': 'https://open-api.bingx.com'}
+
+# === SECURE PROMPT FOR API KEYS (asked EVERY RUN) ===
+print("\n" + "="*60)
+print("   BINGX ×10 BOT – ENTER CREDENTIALS (never saved)")
+print("="*60)
+
+api_key = getpass.getpass("   Enter BingX API Key      : ").strip()
+secret_key = getpass.getpass("   Enter BingX Secret Key   : ").strip()
+
+if not api_key or not secret_key:
+    print("   ERROR: Both fields are required!")
+    exit()
+
+# Choose environment
+env = input("   Testnet (demo) or Live? (t/l) [l]: ").strip().lower() or 'l'
+base_url = "https://open-api-vst.bingx.com" if env == 't' else "https://open-api.bingx.com"
+
+client_bingx = {
+    'api_key': api_key,
+    'secret_key': secret_key,
+    'base_url': base_url
+}
+
+print(f"   Connected to {'TESTNET (virtual money)' if env == 't' else 'LIVE ACCOUNT'}")
+print("="*60 + "\n")
 
 async def get_balance():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'], client_bingx['secret_key'])
