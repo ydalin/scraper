@@ -37,9 +37,17 @@ print("="*60 + "\n")
 async def get_balance():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'], client_bingx['secret_key'])
     if resp.get('code') == 0:
-        data = resp.get('data', [{}])[0]
-        return float(data.get('balance', {}).get('availableBalance', 6000))
-    return 6000.0
+        data = resp.get('data', [])
+        if isinstance(data, list) and len(data) > 0:
+            bal = data[0].get('balance', {}).get('availableBalance') or data[0].get('availableBalance')
+            if bal is not None:
+                return float(bal)
+        # Testnet sometimes returns flat structure
+        if isinstance(data, dict):
+            return float(data.get('availableBalance', 100000))  # testnet default ~$100k
+    # Fallback for any error
+    print("[BALANCE] Using fallback $100,000 (testnet)")
+    return 100000.0
 
 async def get_open_positions_count():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/trade/position', client_bingx['api_key'], client_bingx['secret_key'])
@@ -53,8 +61,10 @@ async def main_loop():
 
     while True:
         try:
+            # Inside main_loop()
             balance = await get_balance()
-            usdt_amount = balance * (config['usdt_per_trade_percent'] / 100)
+            base_amount = 6000 if balance < 50000 else balance  # use realistic base on testnet
+            usdt_amount = base_amount * (config['usdt_per_trade_percent'] / 100)
             open_count = await get_open_positions_count()
 
             if open_count >= config['max_open_positions']:
