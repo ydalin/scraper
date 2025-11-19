@@ -21,86 +21,71 @@ def read_credentials(credentials_file='credentials.txt'):
     return creds
 
 def parse_signal(text):
-    """Parse trading signal from Telegram message text.
-    Returns None if the message is not a valid PREMIUM SIGNAL."""
+    if not text or "PREMIUM SIGNAL" not in text.upper():
+        return None
+
     try:
-        # Early return if not a PREMIUM SIGNAL message
-        if not text or "PREMIUM SIGNAL" not in text.upper():
-            return None
-        
-        # Additional check: Must contain ENTRY, TARGETS, and STOPLOSS keywords
-        # This prevents target update messages like "TARGET #2 DONE" from being parsed
-        required_keywords = ["ENTRY", "TARGETS", "STOPLOSS"]
-        if not all(keyword in text.upper() for keyword in required_keywords):
-            return None
-        
-        # Check for symbol - handle both formats:
-        # Format 1: [SYMBOL/USDT] (with brackets)
-        # Format 2: 🔴SYMBOL/USDT or 🔵SYMBOL/USDT (with emoji, no brackets)
-        # Match SYMBOL/USDT where SYMBOL can be alphanumeric
-        symbol_match = re.search(r'(?:\[([A-Z0-9]+/USDT)\]|([A-Z0-9]+/USDT)\s+(?:SHORT|LONG))', text, re.IGNORECASE)
+        # Direction
+        direction = "LONG" if "LONG" in text.upper() or "BUY" in text.upper() else "SHORT"
+
+        # Symbol - handles both 🟢 SYMBOL/USDT and plain SYMBOL/USDT
+        symbol_match = re.search(r'[🟢🔴]?\s*([A-Z0-9]+/USDT)', text, re.IGNORECASE)
         if not symbol_match:
             return None
-        # Get the first non-None group (whichever format matched)
-        symbol = symbol_match.group(1) or symbol_match.group(2)
-        
-        # Check for direction
-        direction = "LONG" if "LONG" in text.upper() else "SHORT"
-        
-        # Check for leverage - handle both "50X" and "50x" formats
-        leverage_match = re.search(r'(\d+)[Xx]', text)
-        if not leverage_match:
+        symbol = symbol_match.group(1).upper()
+
+        # Leverage - handles 20X, 50X, 75X, etc.
+        lev_match = re.search(r'(\d+)X', text, re.IGNORECASE)
+        if not lev_match:
             return None
-        leverage = int(leverage_match.group(1))
-        
-        # Check for entry range
+        leverage = int(lev_match.group(1))
+
+        # Entry range - <0.00117-0.00118>
         entry_match = re.search(r'<([\d.]+)-([\d.]+)>', text)
         if not entry_match:
             return None
         entry_min = float(entry_match.group(1))
         entry_max = float(entry_match.group(2))
-        if entry_min > entry_max:
-            entry_min, entry_max = entry_max, entry_min
         entry = (entry_min + entry_max) / 2
-        
-        # Check for targets - look for numbered targets section
-        # Format: 1. [0.05261] 2. [0.05208] etc.
+
+        # Targets - extract all [number] in order
         targets = []
-        # First try to find targets in the TARGETS section
-        targets_section = re.search(r'TARGETS:.*?STOPLOSS', text, re.DOTALL | re.IGNORECASE)
-        if targets_section:
-            targets_text = targets_section.group(0)
-            targets_match = re.findall(r'\[([\d.]+)\]', targets_text)
-            targets = [float(x) for x in targets_match[:4]]
-        else:
-            # Fallback: find all [number] patterns and take first 4
-            targets_match = re.findall(r'\[([\d.]+)\]', text)
-            targets = [float(x) for x in targets_match[:4]]
-        
-        if not targets:
+        for m in re.finditer(r'\[([\d.]+)\]', text):
+            targets.append(float(m.group(1)))
+        if len(targets) < 4:
             return None
-        
-        # Check for stoploss - look for STOPLOSS: [number] format
-        stoploss_match = re.search(r'STOPLOSS.*?\[([\d.]+)\]', text, re.IGNORECASE)
-        if not stoploss_match:
-            # Fallback: try without brackets
-            stoploss_match = re.search(r'STOPLOSS.*?([\d.]+)', text, re.IGNORECASE)
-            if not stoploss_match:
+        targets = targets[:4]  # Take first 4 only
+
+        # Stoploss - STOPLOSS: [0.00102] or just [0.00102]
+        sl_match = re.search(r'STOPLOSS.*?([\d.]+)', text, re.IGNORECASE)
+        if not sl_match:
+            # Fallback: last [number] after targets
+            if len(targets) >= 4:
+                # Usually stoploss is the last bracketed number after targets
+                all_brackets = [float(m.group(1)) for m in re.finditer(r'\[([\d.]+)\]', text)]
+                if len(all_brackets) > 4:
+                    stoploss = all_brackets[-1]
+                else:
+                    return None
+            else:
                 return None
-        stoploss = float(stoploss_match.group(1))
-        
+        else:
+            stoploss = float(sl_match.group(1))
+
+        print(f"[PARSED SUCCESS] {symbol} {direction} {leverage}x Entry ~{entry} | TP4: {targets[3]} | SL: {stoploss}")
+
         return {
             'symbol': symbol,
             'direction': direction,
             'leverage': leverage,
+            'entry': entry,
             'entry_min': entry_min,
             'entry_max': entry_max,
-            'entry': entry,
             'targets': targets,
             'stoploss': stoploss,
-            'text': text
+            'raw_text': text
         }
+
     except Exception as e:
-        # Only print error if it's not a simple None return (i.e., actual parsing error)
-        print(f"[PARSE ERROR] {e}")
+        print(f"[PARSE FAILED] {e}\nFirst 200 chars: {text[:200]}")
         return None

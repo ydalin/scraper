@@ -1,14 +1,14 @@
 {
-    "usdt_per_trade": 50.0,
+    "usdt_per_trade": 1.0,
     "max_trades_per_day": 12,
-    "check_interval_seconds": 10,
-    "position_mode": "Cross",
-    "order_type": "MARKET",
-    "tp1_close_percent": 10.0,
-    "tp2_close_percent": 25.0,
-    "tp3_close_percent": 50.0,
-    "tp4_close_percent": 100.0,
-    "dry_run_mode": false,
+    "check_interval_seconds": 6,
+    "position_mode": "Isolated",
+    "order_type": "LIMIT",
+    "tp1_close_percent": 35.0,
+    "tp2_close_percent": 30.0,
+    "tp3_close_percent": 20.0,
+    "tp4_close_percent": 15.0,
+    "dry_run_mode": true,
     "trail_sl_on_tp": 2,
     "max_allowed_leverage": 50
 }
