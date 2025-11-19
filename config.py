@@ -16,7 +16,7 @@ DEFAULT_CONFIG = {
     "trailing_activate_after_tp": 2,        # Activate trailing after TP2
     "trailing_callback_rate": 1.3,          # 1.3% callback
     "stop_loss_percent": 1.8,               # Max 1.8% SL with 10x
-    "dry_run_mode": False,
+    "dry_run_mode": True,
     "min_24h_volume_usd": 30000000,
     "max_funding_rate": 0.05
 }
