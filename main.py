@@ -1,4 +1,4 @@
-# main.py – FINAL CLEAN ×10 BOT (no spam, perfect output)
+# main.py – FINAL CLEAN & SAFE ×10 BOT (no spam, perfect testnet)
 import asyncio
 import hashlib
 from datetime import datetime
@@ -20,7 +20,7 @@ while choice not in ['t', 'l']:
     choice = input("   TESTNET (virtual money) or LIVE (real money)? (t/l): ").strip().lower()
 
 base_url = "https://open-api-vst.bingx.com" if choice == 't' else "https://open-api.bingx.com"
-print(f"   → {'TESTNET (virtual money)' if choice == 't' else 'LIVE ACCOUNT (real money)'}")
+print(f"   → {'TESTNET (virtual money – $6,000 simulated)' if choice == 't' else 'LIVE ACCOUNT (real money)'}")
 print("="*70 + "\n")
 
 client_bingx = {'api_key': api_key, 'secret_key': secret_key, 'base_url': base_url}
@@ -28,7 +28,8 @@ config = get_config()
 
 async def get_balance():
     if choice == 't':
-        return 6000.0
+        return 6000.0                                            # ← forced $6k on testnet
+    # Live balance
     resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'], client_bingx['secret_key'])
     if resp.get('code') == 0 and resp.get('data'):
         bal = resp['data'][0].get('balance', {}).get('availableBalance')
@@ -57,29 +58,22 @@ async def main_loop():
             with open('telegram_messages.txt', 'r', encoding='utf-8') as f:
                 content = f.read()
 
-            new_signal = None
+            new_signal_found = False
             for block in content.split('==='):
                 signal = parse_signal(block)
                 if signal:
                     signal_hash = hashlib.md5(signal['raw_text'].encode()).hexdigest()
                     if signal_hash not in traded_hashes:
-                        new_signal = (signal, signal_hash)
-                        break
+                        actual_leverage = min(signal['leverage'], 10)
+                        print(f"NEW SIGNAL → {signal['symbol']} {signal['direction']} {actual_leverage}x – ${usdt_amount:.0f}")
+                        await execute_trade(client_bingx, signal, usdt_amount, leverage=actual_leverage, config=config)
+                        traded_hashes.add(signal_hash)
+                        print(f"Trade executed – unique signals today: {len(traded_hashes)}\n")
+                        new_signal_found = True
+                        break   # only one new signal per loop
 
-            if not new_signal:
+            if not new_signal_found:
                 await asyncio.sleep(config['check_interval_seconds'])
-                continue
-
-            signal, signal_hash = new_signal
-            actual_leverage = min(signal['leverage'], 10)
-
-            print(f"NEW SIGNAL → {signal['symbol']} {signal['direction']} {actual_leverage}x – ${usdt_amount:.0f}")
-            await execute_trade(client_bingx, signal, usdt_amount, leverage=actual_leverage, config=config)
-
-            traded_hashes.add(signal_hash)
-            print(f"Trade executed – unique signals today: {len(traded_hashes)}\n")
-
-            await asyncio.sleep(config['check_interval_seconds'])
 
         except Exception as e:
             print(f"[ERROR] {e}\n")
