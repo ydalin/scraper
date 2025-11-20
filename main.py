@@ -29,15 +29,20 @@ print("="*60 + "\n")
 
 config = get_config()
 
+
 async def get_balance():
-    resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'], client_bingx['secret_key'])
-    if resp.get('code') == 0:
-        data = resp.get('data', [])
-        if data:
-            bal = data[0].get('balance', {}).get('availableBalance')
-            if bal is not None:
-                return float(bal)
-    return 6000.0 if env == 'l' else 100000.0
+    if 'vst' in client_bingx['base_url']:  # ← TESTNET detected
+        print("[TESTNET MODE] Using virtual $6,000 balance (same as live)")
+        return 6000.0  # ← Forces same as real account
+
+    # LIVE account – get real balance
+    resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'],
+                                   client_bingx['secret_key'])
+    if resp.get('code') == 0 and resp.get('data'):
+        bal = resp['data'][0].get('balance', {}).get('availableBalance')
+        if bal is not None:
+            return float(bal)
+    return 6000.0  # fallback
 
 async def get_open_positions_count():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/trade/position', client_bingx['api_key'], client_bingx['secret_key'])
