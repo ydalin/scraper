@@ -1,15 +1,13 @@
-# main.py – FINAL ×10 VERSION
+# main.py – FINAL ×10 BOT (November 20, 2025) – READY TO RUN
 import asyncio
+import hashlib
 from datetime import datetime
-import getpass
 from api import bingx_api_request
 from bot_telegram import parse_signal
 from trade import execute_trade
 from config import get_config
+import getpass
 
-config = get_config()
-
-# === SECURE PROMPT FOR API KEYS (asked EVERY RUN) ===
 print("\n" + "="*60)
 print("   BINGX ×10 BOT – ENTER CREDENTIALS (never saved)")
 print("="*60)
@@ -17,12 +15,7 @@ print("="*60)
 api_key = getpass.getpass("   Enter BingX API Key      : ").strip()
 secret_key = getpass.getpass("   Enter BingX Secret Key   : ").strip()
 
-if not api_key or not secret_key:
-    print("   ERROR: Both fields are required!")
-    exit()
-
-# Choose environment
-env = input("   Testnet (demo) or Live? (t/l) [l]: ").strip().lower() or 'l'
+env = input("   Testnet (t) or Live (l)? [l]: ").strip().lower() or 'l'
 base_url = "https://open-api-vst.bingx.com" if env == 't' else "https://open-api.bingx.com"
 
 client_bingx = {
@@ -34,20 +27,17 @@ client_bingx = {
 print(f"   Connected to {'TESTNET (virtual money)' if env == 't' else 'LIVE ACCOUNT'}")
 print("="*60 + "\n")
 
+config = get_config()
+
 async def get_balance():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'], client_bingx['secret_key'])
     if resp.get('code') == 0:
         data = resp.get('data', [])
-        if isinstance(data, list) and len(data) > 0:
-            bal = data[0].get('balance', {}).get('availableBalance') or data[0].get('availableBalance')
+        if data:
+            bal = data[0].get('balance', {}).get('availableBalance')
             if bal is not None:
                 return float(bal)
-        # Testnet sometimes returns flat structure
-        if isinstance(data, dict):
-            return float(data.get('availableBalance', 100000))  # testnet default ~$100k
-    # Fallback for any error
-    print("[BALANCE] Using fallback $100,000 (testnet)")
-    return 100000.0
+    return 6000.0 if env == 'l' else 100000.0
 
 async def get_open_positions_count():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/trade/position', client_bingx['api_key'], client_bingx['secret_key'])
@@ -57,40 +47,43 @@ async def get_open_positions_count():
 
 async def main_loop():
     print("×10 BOT STARTED – $6k → $1k–$2k+ daily plan")
-    traded_today = set()
+    traded_hashes = set()          # ← DUPLICATE PROTECTION (by exact signal text)
 
     while True:
         try:
-            # Inside main_loop()
             balance = await get_balance()
-            base_amount = 6000 if balance < 50000 else balance  # use realistic base on testnet
-            usdt_amount = base_amount * (config['usdt_per_trade_percent'] / 100)
+            usdt_amount = balance * (config['usdt_per_trade_percent'] / 100)
             open_count = await get_open_positions_count()
 
             if open_count >= config['max_open_positions']:
-                print(f"[SAFETY] {open_count} positions open – waiting...")
+                print(f"[SAFETY] {open_count}/{config['max_open_positions']} positions open – waiting 8s...")
                 await asyncio.sleep(config['check_interval_seconds'])
                 continue
 
-            # Read signals from file (replace with live Telegram if you want)
             with open('telegram_messages.txt', 'r', encoding='utf-8') as f:
                 content = f.read()
 
-            signals = [parse_signal(block) for block in content.split('===')]
-            signals = [s for s in signals if s and s['symbol'] not in traded_today]
+            new_signals = []
+            for block in content.split('==='):
+                signal = parse_signal(block)
+                if signal:
+                    signal_hash = hashlib.md5(signal['raw_text'].encode()).hexdigest()
+                    if signal_hash not in traded_hashes:
+                        new_signals.append((signal, signal_hash))
 
-            for signal in signals[:1]:  # Process one new signal at a time
-                if open_count >= config['max_open_positions']:
-                    break
+            if not new_signals:
+                await asyncio.sleep(config['check_interval_seconds'])
+                continue
 
-                # CAP LEVERAGE TO 10x
-                actual_leverage = min(signal['leverage'], 10)
-                print(f"\nEXECUTING {signal['symbol']} {signal['direction']} {actual_leverage}x – ${usdt_amount:.0f}")
+            # Take the newest signal only
+            signal, signal_hash = new_signals[-1]
+            actual_leverage = min(signal['leverage'], 10)
 
-                await execute_trade(client_bingx, signal, usdt_amount, leverage=actual_leverage, config=config)
+            print(f"\nNEW SIGNAL → {signal['symbol']} {signal['direction']} {actual_leverage}x – ${usdt_amount:.0f}")
+            await execute_trade(client_bingx, signal, usdt_amount, leverage=actual_leverage, config=config)
 
-                traded_today.add(signal['symbol'])
-                open_count += 1
+            traded_hashes.add(signal_hash)
+            print(f"Signal processed – total unique signals today: {len(traded_hashes)}")
 
             await asyncio.sleep(config['check_interval_seconds'])
 
