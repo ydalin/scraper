@@ -136,11 +136,23 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
                     "symbol": symbol,
                     "side": exit_side,
                     "quantity": f"{trailing_qty:.6f}",
+
+                    # OFFICIAL BINGX PARAMETERS
+                    "callbackRate": str(config.get("trailing_callback_rate", 0.5) / 100),
+                    # Example: config 1.3 → 0.013 (1.3%)
+
                     "activationPrice": str(activation),
-                    "priceRate": str(config.get("trailing_callback_rate", 0.3)),
-                    "reduceOnly": "true",  # <-- close-only trailing
+
+                    # Strongly recommended by BingX docs
+                    "type": "TRAILING_STOP_MARKET",
+                    "workingType": "MARK_PRICE",
+
+                    # Close-only
+                    "reduceOnly": "true"
                 }
+
                 print(f"TRAILING STOP ({trailing_mode}) ORDER:", trail_payload)
+
                 trail_resp = await bingx_api_request(
                     "POST",
                     "/openApi/swap/v2/trade/order/trailingStop",
@@ -148,7 +160,9 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
                     client["secret_key"],
                     data=trail_payload,
                 )
+
                 print("TRAILING STOP RESPONSE:", trail_resp)
+
         else:
             print("No remaining quantity for trailing stop (TP percents sum to 100 or more).")
     else:
