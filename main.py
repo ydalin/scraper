@@ -1,4 +1,4 @@
-# main.py – FINAL ×10 BOT WITH FORCED TESTNET/LIVE CHOICE (November 20, 2025)
+# main.py – FINAL CLEAN ×10 BOT (no spam, perfect output)
 import asyncio
 import hashlib
 from datetime import datetime
@@ -15,33 +15,20 @@ print("="*70)
 api_key = getpass.getpass("   Enter BingX API Key      : ").strip()
 secret_key = getpass.getpass("   Enter BingX Secret Key   : ").strip()
 
-# FORCED CHOICE – no default to live
 choice = ""
 while choice not in ['t', 'l']:
     choice = input("   TESTNET (virtual money) or LIVE (real money)? (t/l): ").strip().lower()
 
-if choice == 't':
-    base_url = "https://open-api-vst.bingx.com"
-    print("   → TESTNET MODE (100% virtual – zero risk)")
-else:
-    base_url = "https://open-api.bingx.com"
-    print("   → LIVE MODE (REAL MONEY – be sure!)")
-
-client_bingx = {
-    'api_key': api_key,
-    'secret_key': secret_key,
-    'base_url': base_url
-}
-
+base_url = "https://open-api-vst.bingx.com" if choice == 't' else "https://open-api.bingx.com"
+print(f"   → {'TESTNET (virtual money)' if choice == 't' else 'LIVE ACCOUNT (real money)'}")
 print("="*70 + "\n")
 
+client_bingx = {'api_key': api_key, 'secret_key': secret_key, 'base_url': base_url}
 config = get_config()
 
 async def get_balance():
-    if 'vst' in client_bingx['base_url']:
-        print("[TESTNET] Using simulated $6,000 balance")
+    if choice == 't':
         return 6000.0
-
     resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'], client_bingx['secret_key'])
     if resp.get('code') == 0 and resp.get('data'):
         bal = resp['data'][0].get('balance', {}).get('availableBalance')
@@ -51,12 +38,10 @@ async def get_balance():
 
 async def get_open_positions_count():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/trade/position', client_bingx['api_key'], client_bingx['secret_key'])
-    if resp.get('code') == 0:
-        return len(resp.get('data', []))
-    return 0
+    return len(resp.get('data', [])) if resp.get('code') == 0 else 0
 
 async def main_loop():
-    print("×10 BOT STARTED – Ready for action\n")
+    print("×10 BOT STARTED – Waiting for new signals...\n")
     traded_hashes = set()
 
     while True:
@@ -66,38 +51,38 @@ async def main_loop():
             open_count = await get_open_positions_count()
 
             if open_count >= config['max_open_positions']:
-                print(f"[SAFETY] {open_count}/{config['max_open_positions']} positions open – waiting...")
                 await asyncio.sleep(config['check_interval_seconds'])
                 continue
 
             with open('telegram_messages.txt', 'r', encoding='utf-8') as f:
                 content = f.read()
 
-            new_signals = []
+            new_signal = None
             for block in content.split('==='):
                 signal = parse_signal(block)
                 if signal:
                     signal_hash = hashlib.md5(signal['raw_text'].encode()).hexdigest()
                     if signal_hash not in traded_hashes:
-                        new_signals.append((signal, signal_hash))
+                        new_signal = (signal, signal_hash)
+                        break
 
-            if not new_signals:
+            if not new_signal:
                 await asyncio.sleep(config['check_interval_seconds'])
                 continue
 
-            signal, signal_hash = new_signals[-1]  # newest one
+            signal, signal_hash = new_signal
             actual_leverage = min(signal['leverage'], 10)
 
-            print(f"\nNEW SIGNAL → {signal['symbol']} {signal['direction']} {actual_leverage}x – ${usdt_amount:.0f}")
+            print(f"NEW SIGNAL → {signal['symbol']} {signal['direction']} {actual_leverage}x – ${usdt_amount:.0f}")
             await execute_trade(client_bingx, signal, usdt_amount, leverage=actual_leverage, config=config)
 
             traded_hashes.add(signal_hash)
-            print(f"Signal executed – unique signals today: {len(traded_hashes)}")
+            print(f"Trade executed – unique signals today: {len(traded_hashes)}\n")
 
             await asyncio.sleep(config['check_interval_seconds'])
 
         except Exception as e:
-            print(f"[ERROR] {e}")
+            print(f"[ERROR] {e}\n")
             await asyncio.sleep(30)
 
 if __name__ == '__main__':
