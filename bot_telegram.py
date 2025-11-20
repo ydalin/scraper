@@ -72,7 +72,8 @@ def parse_signal(text):
         else:
             stoploss = float(sl_match.group(1))
 
-        print(f"[PARSED SUCCESS] {symbol} {direction} {leverage}x Entry ~{entry} | TP4: {targets[3]} | SL: {stoploss}")
+        # OPTIONAL DEBUG (REMOVED TO PREVENT SPAM)
+        # print(f"[PARSED SUCCESS] {symbol} {direction} {leverage}x Entry ~{entry} | TP4: {targets[3]} | SL: {stoploss}")
 
         return {
             'symbol': symbol,

@@ -29,27 +29,7 @@ config = get_config()
 
 # ------------------------ BingX helpers ------------------------
 
-
 async def get_balance():
-    """
-    Query futures account balance from BingX.
-
-    Endpoint: /openApi/swap/v2/user/balance
-    Expected shape (from docs/StackOverflow):
-    {
-        "code": 0,
-        "msg": "",
-        "data": {
-            "balance": {
-                "asset": "USDT",
-                "balance": "0.0000",
-                "equity": "0.0000",
-                "availableMargin": "0.0000",
-                ...
-            }
-        }
-    }
-    """
     resp = await bingx_api_request(
         "GET",
         "/openApi/swap/v2/user/balance",
@@ -58,13 +38,11 @@ async def get_balance():
     )
 
     if resp.get("code") != 0:
-        # API error – fall back to default test balance
         return 6000.0
 
     data = resp.get("data", {})
     bal_info = data.get("balance", {})
 
-    # Prefer availableMargin; fall back to equity/balance if needed
     val = (
         bal_info.get("availableMargin")
         or bal_info.get("equity")
@@ -73,16 +51,11 @@ async def get_balance():
 
     try:
         return float(val) if val is not None else 6000.0
-    except (TypeError, ValueError):
+    except:
         return 6000.0
 
 
 async def get_open_positions_count():
-    """
-    Query number of open futures positions.
-
-    Endpoint: /openApi/swap/v2/user/positions
-    """
     resp = await bingx_api_request(
         "GET",
         "/openApi/swap/v2/user/positions",
@@ -97,13 +70,12 @@ async def get_open_positions_count():
 
     if isinstance(data, list):
         return len(data)
-    elif isinstance(data, dict) and data:
+    if isinstance(data, dict) and data:
         return 1
     return 0
 
 
 # ------------------------ Main loop ------------------------
-
 
 async def main_loop():
     print("×10 BOT STARTED – Waiting for new signals...\n")
@@ -115,7 +87,6 @@ async def main_loop():
             usdt_amount = balance * (config["usdt_per_trade_percent"] / 100)
 
             if test:
-                # Tiny test mode: $1–$9 regardless of balance
                 usdt_amount = max(1.0, min(9.0, usdt_amount))
 
             open_count = await get_open_positions_count()
@@ -127,7 +98,6 @@ async def main_loop():
                 await asyncio.sleep(config["check_interval_seconds"])
                 continue
 
-            # Read local Telegram scrape file
             try:
                 with open("telegram_messages.txt", "r", encoding="utf-8") as f:
                     content = f.read()
@@ -138,7 +108,6 @@ async def main_loop():
 
             new_signal = None
 
-            # Signals separated by '===' blocks in the file
             for block in content.split("==="):
                 signal = parse_signal(block)
                 if signal:
@@ -148,7 +117,6 @@ async def main_loop():
                         break
 
             if not new_signal:
-                # No new untraded signals
                 await asyncio.sleep(config["check_interval_seconds"])
                 continue
 
@@ -166,6 +134,7 @@ async def main_loop():
                 usdt_amount,
                 leverage=lev,
                 config=config,
+                dry_run=False,
             )
 
             traded_hashes.add(h)
@@ -176,7 +145,6 @@ async def main_loop():
         except Exception as e:
             print(f"[ERROR] {e}\n")
             await asyncio.sleep(30)
-
 
 
 if __name__ == "__main__":
