@@ -1,4 +1,4 @@
-# main.py – FINAL – NO ERRORS, REAL TRADES
+# main.py – FINAL – SAFE MODE ($5 max loss) + CONFIG-AWARE NORMAL MODE
 import asyncio
 import hashlib
 import getpass
@@ -15,8 +15,14 @@ print("=" * 70)
 api_key = getpass.getpass("   Enter BingX API Key      : ").strip()
 secret_key = getpass.getpass("   Enter BingX Secret Key   : ").strip()
 
-test = input("   Tiny test mode ($1–$9 + 1–2x) or Normal mode? (t/n) [n]: ").strip().lower() == "t"
-print("   → TINY TEST MODE – $1–$9 + 1–2x leverage" if test else "   → NORMAL MODE – 5.8% + 10x leverage")
+mode_input = input("   Safe Mode (max ~$5 loss) or Normal mode? (s/n) [s]: ").strip().lower()
+safe_mode = (mode_input != "n")
+
+if safe_mode:
+    print("   → SAFE MODE ENABLED – $5 margin per trade, 1× leverage, max loss ≈ $5")
+else:
+    print("   → NORMAL MODE – config-based sizing")
+
 print("=" * 70 + "\n")
 
 client_bingx = {
@@ -24,12 +30,48 @@ client_bingx = {
     "secret_key": secret_key,
     "base_url": "https://open-api.bingx.com",
 }
+
 config = get_config()
+
+# One-time config summary (no spam)
+if config.get("use_absolute_usdt", False):
+    sizing_str = f"ABSOLUTE ${config['absolute_usdt_per_trade']:.2f} per trade"
+else:
+    sizing_str = f"{config['usdt_per_trade_percent']:.2f}% of balance per trade"
+
+print(
+    f"[CONFIG] Sizing: {sizing_str}, "
+    f"Max leverage: {config.get('max_leverage', 10)}, "
+    f"Max open positions: {config.get('max_open_positions', 0)}, "
+    f"Dry-run: {config.get('dry_run_mode', False)}"
+)
 
 
 # ------------------------ BingX helpers ------------------------
 
+
 async def get_balance():
+    """
+    Query futures account balance from BingX.
+
+    Endpoint: /openApi/swap/v2/user/balance
+
+    Expected shape (common BingX examples):
+
+    {
+        "code": 0,
+        "msg": "",
+        "data": {
+            "balance": {
+                "asset": "USDT",
+                "balance": "0.0000",
+                "equity": "0.0000",
+                "availableMargin": "0.0000",
+                ...
+            }
+        }
+    }
+    """
     resp = await bingx_api_request(
         "GET",
         "/openApi/swap/v2/user/balance",
@@ -51,11 +93,16 @@ async def get_balance():
 
     try:
         return float(val) if val is not None else 6000.0
-    except:
+    except Exception:
         return 6000.0
 
 
 async def get_open_positions_count():
+    """
+    Query number of open futures positions.
+
+    Endpoint: /openApi/swap/v2/user/positions
+    """
     resp = await bingx_api_request(
         "GET",
         "/openApi/swap/v2/user/positions",
@@ -77,6 +124,7 @@ async def get_open_positions_count():
 
 # ------------------------ Main loop ------------------------
 
+
 async def main_loop():
     print("×10 BOT STARTED – Waiting for new signals...\n")
     traded_hashes = set()
@@ -84,10 +132,16 @@ async def main_loop():
     while True:
         try:
             balance = await get_balance()
-            usdt_amount = balance * (config["usdt_per_trade_percent"] / 100)
 
-            if test:
-                usdt_amount = max(1.0, min(9.0, usdt_amount))
+            # Decide trade size
+            if config.get("use_absolute_usdt", False):
+                usdt_amount = config["absolute_usdt_per_trade"]
+            else:
+                usdt_amount = balance * (config["usdt_per_trade_percent"] / 100.0)
+
+            # SAFE MODE: hard cap $5 per trade
+            if safe_mode:
+                usdt_amount = 5.0
 
             open_count = await get_open_positions_count()
             if open_count >= config["max_open_positions"]:
@@ -121,7 +175,13 @@ async def main_loop():
                 continue
 
             signal, h = new_signal
-            lev = min(signal["leverage"], 2 if test else 10)
+
+            # Respect safe mode & max_leverage from config
+            max_lev = config.get("max_leverage", 10)
+            if safe_mode:
+                lev = 1
+            else:
+                lev = min(signal["leverage"], max_lev)
 
             print(
                 f"NEW SIGNAL → {signal['symbol']} {signal['direction']} "
@@ -134,11 +194,11 @@ async def main_loop():
                 usdt_amount,
                 leverage=lev,
                 config=config,
-                dry_run=False,
+                dry_run=False,  # config['dry_run_mode'] is checked inside execute_trade
             )
 
             traded_hashes.add(h)
-            print(f"Trade executed – unique today: {len(traded_hashes)}\n")
+            print(f"Trade executed – unique this run: {len(traded_hashes)}\n")
 
             await asyncio.sleep(config["check_interval_seconds"])
 

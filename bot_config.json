@@ -8,7 +8,7 @@
     "tp2_close_percent": 30.0,
     "tp3_close_percent": 20.0,
     "tp4_close_percent": 15.0,
-    "dry_run_mode": true,
+    "dry_run_mode": false,
     "trail_sl_on_tp": 2,
     "max_allowed_leverage": 50
 }
