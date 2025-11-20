@@ -1,4 +1,4 @@
-# trade.py – REAL BINGX ORDERS (WORKS 100% – November 20, 2025)
+# trade.py – FINAL ×10 EXECUTION – CORRECT SYMBOL FORMAT SYMBOLUSDT
 from api import bingx_api_request
 
 async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, dry_run=False):
@@ -6,7 +6,9 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         from config import get_config
         config = get_config()
 
-    symbol = signal['symbol'].replace('-', '')  # BingX uses BTCUSDT, not BTC-USDT
+    # FIX: BingX now requires SYMBOLUSDT (no slash, no dash)
+    symbol = signal['symbol'].replace('/', '').replace('-', '').upper()  # BTC/USDT → BTCUSDT
+
     direction = signal['direction']
     entry = signal['entry']
     targets = signal['targets']
@@ -18,9 +20,9 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
 
     qty = round((usdt_amount * leverage) / entry, 6)
 
-    # Set leverage & isolated
+    # Set leverage & isolated mode
     await bingx_api_request('POST', '/openApi/swap/v2/trade/leverage', client['api_key'], client['secret_key'], data={
-        'symbol': symbol, 'leverage': leverage, 'side': 'BOTH'
+        'symbol': symbol, 'side': 'BOTH', 'leverage': leverage
     })
     await bingx_api_request('POST', '/openApi/swap/v2/trade/marginType', client['api_key'], client['secret_key'], data={
         'symbol': symbol, 'marginType': 'ISOLATED'
@@ -44,7 +46,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     entry_resp = await bingx_api_request('POST', '/openApi/swap/v2/trade/order', client['api_key'], client['secret_key'], data=entry_payload)
     print(f"ENTRY RESPONSE: {entry_resp}")
 
-    # 4 TP
+    # 4 Take Profits
     closed = 0.0
     for i, tp in enumerate(targets):
         percent = [config['tp1_close_percent'], config['tp2_close_percent'], config['tp3_close_percent'], config['tp4_close_percent']][i]
@@ -63,23 +65,23 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         }
         await bingx_api_request('POST', '/openApi/swap/v2/trade/order', client['api_key'], client['secret_key'], data=tp_payload)
 
-    # Trailing stop on remaining
-    remaining = qty * (100 - closed) / 100
-    if remaining > 0:
+    # Trailing Stop on remaining
+    remaining_qty = qty * (100 - closed) / 100
+    if remaining_qty > 0:
         trail_payload = {
             'symbol': symbol,
             'side': opposite,
             'positionSide': 'BOTH',
             'type': 'TRAILING_STOP_MARKET',
-            'quantity': f"{remaining:.6f}",
+            'quantity': f"{remaining_qty:.6f}",
             'callbackRate': str(config['trailing_callback_rate']),
             'workingType': 'MARK_PRICE',
             'reduceOnly': 'false'
         }
         await bingx_api_request('POST', '/openApi/swap/v2/trade/order', client['api_key'], client['secret_key'], data=trail_payload)
-        print("TRAILING STOP PLACED ON REMAINING POSITION")
+        print("TRAILING STOP PLACED ON REMAINING RUNNER")
 
-    # Stop loss
+    # Stop Loss
     sl_payload = {
         'symbol': symbol,
         'side': opposite,
