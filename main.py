@@ -1,4 +1,4 @@
-# main.py – FINAL ×10 BOT – TINY/NORMAL MODE + NO SYNTAX ERRORS
+# main.py – FINAL – NO ERRORS, REAL TRADES
 import asyncio
 import hashlib
 from api import bingx_api_request

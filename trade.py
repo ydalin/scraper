@@ -1,4 +1,4 @@
-# trade.py – FINAL ×10 EXECUTION – NO SYNTAX ERRORS, SYMBOL-USDT, NO positionSide
+# trade.py – FINAL – SYMBOL-USDT + NO positionSide ERROR
 from api import bingx_api_request
 
 async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, dry_run=False):
@@ -6,9 +6,8 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         from config import get_config
         config = get_config()
 
-    # Symbol fix: BTC/USDT or BTCUSDT → BTC-USDT (BingX current requirement)
-    symbol_raw = signal['symbol'].upper()
-    symbol = symbol_raw.replace('/', '-').replace('USDT', '-USDT') if '-' not in symbol_raw else symbol_raw
+    # Symbol fix: BTC/USDT → BTC-USDT
+    symbol = signal['symbol'].upper().replace('/', '-')
     if not symbol.endswith('-USDT'):
         symbol = symbol.replace('USDT', '') + '-USDT'
 
@@ -21,19 +20,14 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         print(f"[DRY RUN] Would open {direction} {symbol} {leverage}x ${usdt_amount:.2f}")
         return
 
-    # Calculate quantity
     qty = round((usdt_amount * leverage) / entry, 6)
 
     # Set leverage & isolated mode
     await bingx_api_request('POST', '/openApi/swap/v2/trade/leverage', client['api_key'], client['secret_key'], data={
-        'symbol': symbol,
-        'side': 'BOTH',
-        'leverage': leverage
+        'symbol': symbol, 'side': 'BOTH', 'leverage': leverage
     })
-
     await bingx_api_request('POST', '/openApi/swap/v2/trade/marginType', client['api_key'], client['secret_key'], data={
-        'symbol': symbol,
-        'marginType': 'ISOLATED'
+        'symbol': symbol, 'marginType': 'ISOLATED'
     })
 
     # Entry order – NO positionSide (causes error in One-Way mode)
@@ -84,7 +78,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
             'reduceOnly': 'false'
         }
         await bingx_api_request('POST', '/openApi/swap/v2/trade/order', client['api_key'], client['secret_key'], data=trail_payload)
-        print("TRAILING STOP PLACED ON REMAINING RUNNER")
+        print("TRAILING STOP PLACED")
 
     # Stop Loss
     sl_payload = {
