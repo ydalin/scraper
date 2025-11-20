@@ -1,4 +1,4 @@
-# main.py – FINAL ×10 BOT (November 20, 2025) – READY TO RUN
+# main.py – FINAL ×10 BOT WITH FORCED TESTNET/LIVE CHOICE (November 20, 2025)
 import asyncio
 import hashlib
 from datetime import datetime
@@ -8,15 +8,24 @@ from trade import execute_trade
 from config import get_config
 import getpass
 
-print("\n" + "="*60)
-print("   BINGX ×10 BOT – ENTER CREDENTIALS (never saved)")
-print("="*60)
+print("\n" + "="*70)
+print("   BINGX ×10 FUTURES BOT – $6k → $1k–$2k+ daily")
+print("="*70)
 
 api_key = getpass.getpass("   Enter BingX API Key      : ").strip()
 secret_key = getpass.getpass("   Enter BingX Secret Key   : ").strip()
 
-env = input("   Testnet (t) or Live (l)? [l]: ").strip().lower() or 'l'
-base_url = "https://open-api-vst.bingx.com" if env == 't' else "https://open-api.bingx.com"
+# FORCED CHOICE – no default to live
+choice = ""
+while choice not in ['t', 'l']:
+    choice = input("   TESTNET (virtual money) or LIVE (real money)? (t/l): ").strip().lower()
+
+if choice == 't':
+    base_url = "https://open-api-vst.bingx.com"
+    print("   → TESTNET MODE (100% virtual – zero risk)")
+else:
+    base_url = "https://open-api.bingx.com"
+    print("   → LIVE MODE (REAL MONEY – be sure!)")
 
 client_bingx = {
     'api_key': api_key,
@@ -24,25 +33,21 @@ client_bingx = {
     'base_url': base_url
 }
 
-print(f"   Connected to {'TESTNET (virtual money)' if env == 't' else 'LIVE ACCOUNT'}")
-print("="*60 + "\n")
+print("="*70 + "\n")
 
 config = get_config()
 
-
 async def get_balance():
-    if 'vst' in client_bingx['base_url']:  # ← TESTNET detected
-        print("[TESTNET MODE] Using virtual $6,000 balance (same as live)")
-        return 6000.0  # ← Forces same as real account
+    if 'vst' in client_bingx['base_url']:
+        print("[TESTNET] Using simulated $6,000 balance")
+        return 6000.0
 
-    # LIVE account – get real balance
-    resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'],
-                                   client_bingx['secret_key'])
+    resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'], client_bingx['secret_key'])
     if resp.get('code') == 0 and resp.get('data'):
         bal = resp['data'][0].get('balance', {}).get('availableBalance')
         if bal is not None:
             return float(bal)
-    return 6000.0  # fallback
+    return 6000.0
 
 async def get_open_positions_count():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/trade/position', client_bingx['api_key'], client_bingx['secret_key'])
@@ -51,8 +56,8 @@ async def get_open_positions_count():
     return 0
 
 async def main_loop():
-    print("×10 BOT STARTED – $6k → $1k–$2k+ daily plan")
-    traded_hashes = set()          # ← DUPLICATE PROTECTION (by exact signal text)
+    print("×10 BOT STARTED – Ready for action\n")
+    traded_hashes = set()
 
     while True:
         try:
@@ -61,7 +66,7 @@ async def main_loop():
             open_count = await get_open_positions_count()
 
             if open_count >= config['max_open_positions']:
-                print(f"[SAFETY] {open_count}/{config['max_open_positions']} positions open – waiting 8s...")
+                print(f"[SAFETY] {open_count}/{config['max_open_positions']} positions open – waiting...")
                 await asyncio.sleep(config['check_interval_seconds'])
                 continue
 
@@ -80,15 +85,14 @@ async def main_loop():
                 await asyncio.sleep(config['check_interval_seconds'])
                 continue
 
-            # Take the newest signal only
-            signal, signal_hash = new_signals[-1]
+            signal, signal_hash = new_signals[-1]  # newest one
             actual_leverage = min(signal['leverage'], 10)
 
             print(f"\nNEW SIGNAL → {signal['symbol']} {signal['direction']} {actual_leverage}x – ${usdt_amount:.0f}")
             await execute_trade(client_bingx, signal, usdt_amount, leverage=actual_leverage, config=config)
 
             traded_hashes.add(signal_hash)
-            print(f"Signal processed – total unique signals today: {len(traded_hashes)}")
+            print(f"Signal executed – unique signals today: {len(traded_hashes)}")
 
             await asyncio.sleep(config['check_interval_seconds'])
 
