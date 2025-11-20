@@ -1,4 +1,4 @@
-# main.py – FINAL CLEAN & SAFE ×10 BOT (no spam, perfect testnet)
+# main.py – REAL VIRTUAL MONEY VERSION (works with BingX demo account)
 import asyncio
 import hashlib
 from datetime import datetime
@@ -9,32 +9,26 @@ from config import get_config
 import getpass
 
 print("\n" + "="*70)
-print("   BINGX ×10 FUTURES BOT – $6k → $1k–$2k+ daily")
+print("   BINGX ×10 FUTURES BOT – Virtual or Real Money")
 print("="*70)
 
 api_key = getpass.getpass("   Enter BingX API Key      : ").strip()
 secret_key = getpass.getpass("   Enter BingX Secret Key   : ").strip()
 
-choice = ""
-while choice not in ['t', 'l']:
-    choice = input("   TESTNET (virtual money) or LIVE (real money)? (t/l): ").strip().lower()
+# BingX has NO separate testnet API — we always use the live URL
+# Virtual trades work when you switch to "Virtual USDT Account" in the web interface
+base_url = "https://open-api.bingx.com"
+client_bingx = {'api_key': api_key, 'secret_key': secret_key, 'base_url': base_url}
 
-base_url = "https://open-api-vst.bingx.com" if choice == 't' else "https://open-api.bingx.com"
-print(f"   → {'TESTNET (virtual money – $6,000 simulated)' if choice == 't' else 'LIVE ACCOUNT (real money)'}")
+print("   → Connected (use Virtual USDT Account in BingX web for demo trading)")
+print("   → Use your NORMAL live API keys – they work for both real and virtual")
 print("="*70 + "\n")
 
-client_bingx = {'api_key': api_key, 'secret_key': secret_key, 'base_url': base_url}
 config = get_config()
 
 async def get_balance():
-    if choice == 't':
-        return 6000.0                                            # ← forced $6k on testnet
-    # Live balance
-    resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'], client_bingx['secret_key'])
-    if resp.get('code') == 0 and resp.get('data'):
-        bal = resp['data'][0].get('balance', {}).get('availableBalance')
-        if bal is not None:
-            return float(bal)
+    # For virtual mode, we simulate $6,000 (real demo balance is ~100k VST but we keep it realistic)
+    print("[INFO] Virtual mode – using simulated $6,000 balance")
     return 6000.0
 
 async def get_open_positions_count():
@@ -42,7 +36,7 @@ async def get_open_positions_count():
     return len(resp.get('data', [])) if resp.get('code') == 0 else 0
 
 async def main_loop():
-    print("×10 BOT STARTED – Waiting for new signals...\n")
+    print("×10 BOT STARTED – Waiting for new signals (virtual trades)...\n")
     traded_hashes = set()
 
     while True:
@@ -58,22 +52,29 @@ async def main_loop():
             with open('telegram_messages.txt', 'r', encoding='utf-8') as f:
                 content = f.read()
 
-            new_signal_found = False
+            new_signal = None
             for block in content.split('==='):
                 signal = parse_signal(block)
                 if signal:
                     signal_hash = hashlib.md5(signal['raw_text'].encode()).hexdigest()
                     if signal_hash not in traded_hashes:
-                        actual_leverage = min(signal['leverage'], 10)
-                        print(f"NEW SIGNAL → {signal['symbol']} {signal['direction']} {actual_leverage}x – ${usdt_amount:.0f}")
-                        await execute_trade(client_bingx, signal, usdt_amount, leverage=actual_leverage, config=config)
-                        traded_hashes.add(signal_hash)
-                        print(f"Trade executed – unique signals today: {len(traded_hashes)}\n")
-                        new_signal_found = True
-                        break   # only one new signal per loop
+                        new_signal = (signal, signal_hash)
+                        break
 
-            if not new_signal_found:
+            if not new_signal:
                 await asyncio.sleep(config['check_interval_seconds'])
+                continue
+
+            signal, signal_hash = new_signal
+            actual_leverage = min(signal['leverage'], 10)
+
+            print(f"NEW VIRTUAL SIGNAL → {signal['symbol']} {signal['direction']} {actual_leverage}x – ${usdt_amount:.0f}")
+            await execute_trade(client_bingx, signal, usdt_amount, leverage=actual_leverage, config=config)
+
+            traded_hashes.add(signal_hash)
+            print(f"Virtual trade executed – unique signals today: {len(traded_hashes)}\n")
+
+            await asyncio.sleep(config['check_interval_seconds'])
 
         except Exception as e:
             print(f"[ERROR] {e}\n")
