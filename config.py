@@ -1,10 +1,7 @@
-# config.py – FINAL ×10 PLAN SETTINGS
-import json
-import os
-
+# config.py – FINAL SETTINGS
 DEFAULT_CONFIG = {
-    "usdt_per_trade_percent": 5.8,          # 5.8% of current balance per trade
-    "max_open_positions": 14,               # NEVER exceed 14 open trades
+    "usdt_per_trade_percent": 5.8,          # 5.8% of balance (~$348 on $6k)
+    "max_open_positions": 14,               # Safety limit
     "max_trades_per_day": 20,
     "check_interval_seconds": 8,
     "position_mode": "Isolated",
@@ -13,17 +10,16 @@ DEFAULT_CONFIG = {
     "tp2_close_percent": 30.0,
     "tp3_close_percent": 20.0,
     "tp4_close_percent": 15.0,
-    "trailing_activate_after_tp": 2,        # Activate trailing after TP2
-    "trailing_callback_rate": 1.3,          # 1.3% callback
-    "stop_loss_percent": 1.8,               # Max 1.8% SL with 10x
-    "dry_run_mode": False,
-    "min_24h_volume_usd": 30000000,
-    "max_funding_rate": 0.05
+    "trailing_activate_after_tp": 2,
+    "trailing_callback_rate": 1.3,
+    "stop_loss_percent": 1.8,
+    "dry_run_mode": False
 }
 
 CONFIG_FILE = "bot_config.json"
 
 def load_config():
+    import json, os
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r') as f:

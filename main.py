@@ -1,4 +1,4 @@
-# main.py – FINAL ×10 BOT – ONLY ONE TEST OPTION (tiny money + tiny leverage)
+# main.py – FINAL ×10 BOT (tiny test mode or full power)
 import asyncio
 import hashlib
 from api import bingx_api_request
@@ -14,18 +14,14 @@ print("="*70)
 api_key = getpass.getpass("   Enter BingX API Key      : ").strip()
 secret_key = getpass.getpass("   Enter BingX Secret Key   : ").strip()
 
-test_mode = input("   Test mode (tiny money + tiny leverage) or Normal mode? (t/n) [n]: ").strip().lower() == 't'
-
-
-if test_mode:
-    print("   → TEST MODE – $1–$9 per trade + 1x–2x leverage (ultra-safe real money testing)")
+test = input("   Tiny test mode ($1–$9 + 1–2x) or Normal mode? (t/n) [n]: ").strip().lower() == 't'
+if test:
+    print("   → TINY TEST MODE – $1–$9 per trade + 1–2x leverage")
 else:
-    print("   → NORMAL MODE – 5.8% per trade + 10x leverage (full profit)")
-
+    print("   → NORMAL MODE – 5.8% per trade + 10x leverage")
 print("="*70 + "\n")
 
-base_url = "https://open-api.bingx.com"
-client_bingx = {'api_key': api_key, 'secret_key': secret_key, 'base_url': base_url}
+client_bingx = {'api_key': api_key, 'secret_key': secret_key, 'base_url': "https://open-api.bingx.com"}
 config = get_config()
 
 async def get_balance():
@@ -48,15 +44,10 @@ async def main_loop():
         try:
             balance = await get_balance()
             usdt_amount = balance * (config['usdt_per_trade_percent'] / 100)
-
-            if test_mode:
-                usdt_amount = max(1.0, min(9.0, usdt_amount))   # tiny money
-                max_lev = 2
-            else:
-                max_lev = 10
+            if test:
+                usdt_amount = max(1.0, min(9.0, usdt_amount))
 
             open_count = await get_open_positions_count()
-
             if open_count >= config['max_open_positions']:
                 await asyncio.sleep(config['check_interval_seconds'])
                 continue
@@ -68,23 +59,23 @@ async def main_loop():
             for block in content.split('==='):
                 signal = parse_signal(block)
                 if signal:
-                    signal_hash = hashlib.md5(signal['raw_text'].encode()).hexdigest()
-                    if signal_hash not in traded_hashes:
-                        new_signal = (signal, signal_hash)
+                    h = hashlib.md5(signal['raw_text'].encode()).hexdigest()
+                    if h not in traded_hashes:
+                        new_signal = (signal, h)
                         break
 
             if not new_signal:
                 await asyncio.sleep(config['check_interval_seconds'])
                 continue
 
-            signal, signal_hash = new_signal
-            actual_leverage = min(signal['leverage'], max_lev)   # tiny or full leverage
+            signal, h = new_signal
+            lev = min(signal['leverage'], 2 if test else 10)
 
-            print(f"NEW SIGNAL → {signal['symbol']} {signal['direction']} {actual_leverage}x – ${usdt_amount:.2f}")
-            await execute_trade(client_bingx, signal, usdt_amount, leverage=actual_leverage, config=config)
+            print(f"NEW SIGNAL → {signal['symbol']} {signal['direction']} {lev}x – ${usdt_amount:.2f}")
+            await execute_trade(client_bingx, signal, usdt_amount, leverage=lev, config=config)
 
-            traded_hashes.add(signal_hash)
-            print(f"Trade executed – unique signals today: {len(traded_hashes)}\n")
+            traded_hashes.add(h)
+            print(f"Trade executed – unique today: {len(traded_hashes)}\n")
 
             await asyncio.sleep(config['check_interval_seconds'])
 
