@@ -8,8 +8,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
 
     # Symbol fix: BTC/USDT → BTC-USDT
     symbol = signal['symbol'].upper().replace('/', '-')
-    if not symbol.endswith('-USDT'):
-        symbol = symbol.replace('USDT', '') + '-USDT'
+
 
     direction = signal['direction']
     entry = signal['entry']
