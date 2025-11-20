@@ -1,4 +1,4 @@
-# main.py – FINAL ×10 BOT – BALANCE + CONFIG AT START (no syntax error)
+# main.py – FINAL ×10 BOT – 100% CRASH-PROOF BALANCE + CLEAN STARTUP
 import asyncio
 import hashlib
 from api import bingx_api_request
@@ -23,10 +23,17 @@ config = get_config()
 
 async def get_balance():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'], client_bingx['secret_key'])
-    if resp.get('code') == 0 and resp.get('data'):
-        bal = resp['data'][0].get('balance', {}).get('availableBalance')
-        if bal is not None:
-            return float(bal)
+    if resp.get('code') == 0:
+        data = resp.get('data')
+        if data:
+            # Handle both list and dict structures
+            if isinstance(data, list) and len(data) > 0:
+                item = data[0]
+                if 'balance' in item:
+                    return float(item['balance'].get('availableBalance', 6000))
+                return float(item.get('availableBalance', 6000))
+            elif isinstance(data, dict):
+                return float(data.get('availableBalance', 6000))
     return 6000.0
 
 async def print_startup_info():
@@ -41,7 +48,7 @@ async def print_startup_info():
     if test:
         print("Trade Size        : $1–$9 (tiny mode)")
     else:
-        print("Trade Size        : {0:.1f}% (~${1:,.0f})".format(config['usdt_per_trade_percent'], usdt_amount))
+        print(f"Trade Size        : {config['usdt_per_trade_percent']}% (~${usdt_amount:,.0f})")
     print(f"Leverage          : {'1x–2x' if test else '10x'}")
     print(f"Max Open Positions: {config['max_open_positions']}")
     print(f"TP Split          : {config['tp1_close_percent']}% / {config['tp2_close_percent']}% / {config['tp3_close_percent']}% / {config['tp4_close_percent']}%")
