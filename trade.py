@@ -1,4 +1,4 @@
-# trade.py – FINAL ×10 EXECUTION – CORRECT SYMBOL FORMAT SYMBOLUSDT
+# trade.py – FINAL ×10 EXECUTION – CORRECT SYMBOL FORMAT: SYMBOL-USDT
 from api import bingx_api_request
 
 async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, dry_run=False):
@@ -6,8 +6,11 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         from config import get_config
         config = get_config()
 
-    # FIX: BingX now requires SYMBOLUSDT (no slash, no dash)
-    symbol = signal['symbol'].replace('/', '').replace('-', '').upper()  # BTC/USDT → BTCUSDT
+    # FIX: BingX now requires SYMBOL-USDT format (e.g. BTC-USDT)
+    raw_symbol = signal['symbol'].upper()           # e.g. BTC/USDT or BTCUSDT
+    symbol = raw_symbol.replace('/', '-').replace('USDT', '-USDT') if '-' not in raw_symbol else raw_symbol
+    if not symbol.endswith('-USDT'):
+        symbol = symbol.replace('USDT', '') + '-USDT'
 
     direction = signal['direction']
     entry = signal['entry']
