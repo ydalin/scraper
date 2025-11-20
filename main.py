@@ -68,35 +68,46 @@ async def fetch_live_signals(limit=10, n_signals=1, last_message_id=None):
 
 def fetch_signals_from_file(n_signals=1):
     """
-    Fetch last PREMIUM SIGNAL(S) from telegram_messages.txt.
-    Used for DRY-RUN mode and TestY mode.
+    Read last X signals from telegram_messages.txt.
+
+    Expected format per signal block (like real Telegram messages):
+    PREMIUM SIGNAL
+    🔴DASH/USDT SHORT (sell)
+    Margin: Cross, 50X
+    ENTRY: <82.35615-83.18385>
+    ———
+    🎯TARGETS:
+    1. [81.94230] 2. [81.11460]
+    3. [80.28690] 4. [78.63150]
+    ———
+    ❌STOPLOSS: [86.00880]
+
+    Blocks are separated by a blank line.
     """
     try:
         with open('telegram_messages.txt', 'r', encoding='utf-8') as f:
-            content = f.read()
+            content = f.read().strip()
     except FileNotFoundError:
         print("telegram_messages.txt not found.")
         return []
 
-    # Rough split on "Message ID:" pattern used in your logs
-    blocks = re.split(r'Message ID:', content)[1:]
-    messages = []
-    for block in blocks:
-        msg_text = re.search(r'Text: (.*?)(?=Message ID:|$)', block, re.DOTALL)
-        if msg_text:
-            clean_text = msg_text.group(1).strip()
-            if "PREMIUM SIGNAL" in clean_text:
-                messages.append(clean_text)
+    # Split into blocks separated by blank lines
+    blocks = re.split(r'\n\s*\n', content)
 
     signals = []
-    for msg in messages[-n_signals:]:
-        sig = parse_signal(msg)
+    for block in blocks:
+        if "PREMIUM SIGNAL" not in block:
+            continue
+        sig = parse_signal(block)
         if sig:
             signals.append(sig)
 
     if not signals:
         print("No valid signals found in telegram_messages.txt.")
-    return signals
+        return []
+
+    # Return only the last N signals
+    return signals[-n_signals:]
 
 
 # ==============================
@@ -346,7 +357,6 @@ async def main():
             if i >= max_trades:
                 break
 
-            # DRY-RUN clamps still apply
             if dry_run:
                 safe_usdt = 5.0
                 usdt_eff = min(usdt_amount, safe_usdt)
