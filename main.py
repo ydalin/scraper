@@ -16,6 +16,7 @@ secret_key = getpass.getpass("   Enter BingX Secret Key   : ").strip()
 
 test_mode = input("   Test mode (tiny money + tiny leverage) or Normal mode? (t/n) [n]: ").strip().lower() == 't'
 
+
 if test_mode:
     print("   → TEST MODE – $1–$9 per trade + 1x–2x leverage (ultra-safe real money testing)")
 else:
