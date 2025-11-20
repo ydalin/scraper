@@ -1,4 +1,4 @@
-# main.py – REAL VIRTUAL MONEY VERSION (works with BingX demo account)
+# main.py – VIRTUAL MONEY VERSION (correct for BingX demo/VST)
 import asyncio
 import hashlib
 from datetime import datetime
@@ -15,19 +15,17 @@ print("="*70)
 api_key = getpass.getpass("   Enter BingX API Key      : ").strip()
 secret_key = getpass.getpass("   Enter BingX Secret Key   : ").strip()
 
-# BingX has NO separate testnet API — we always use the live URL
-# Virtual trades work when you switch to "Virtual USDT Account" in the web interface
+# BingX virtual trading uses the LIVE API URL – no testnet URL exists
 base_url = "https://open-api.bingx.com"
 client_bingx = {'api_key': api_key, 'secret_key': secret_key, 'base_url': base_url}
 
-print("   → Connected (use Virtual USDT Account in BingX web for demo trading)")
-print("   → Use your NORMAL live API keys – they work for both real and virtual")
+print("   → Connected – go to BingX web → Futures → switch to 'Virtual USDT Account' for demo")
 print("="*70 + "\n")
 
 config = get_config()
 
 async def get_balance():
-    # For virtual mode, we simulate $6,000 (real demo balance is ~100k VST but we keep it realistic)
+    # Simulate $6,000 for clean testing (real VST balance is ~100k but we keep it realistic)
     print("[INFO] Virtual mode – using simulated $6,000 balance")
     return 6000.0
 
@@ -36,7 +34,7 @@ async def get_open_positions_count():
     return len(resp.get('data', [])) if resp.get('code') == 0 else 0
 
 async def main_loop():
-    print("×10 BOT STARTED – Waiting for new signals (virtual trades)...\n")
+    print("×10 BOT STARTED – Waiting for new signals...\n")
     traded_hashes = set()
 
     while True:
@@ -68,7 +66,7 @@ async def main_loop():
             signal, signal_hash = new_signal
             actual_leverage = min(signal['leverage'], 10)
 
-            print(f"NEW VIRTUAL SIGNAL → {signal['symbol']} {signal['direction']} {actual_leverage}x – ${usdt_amount:.0f}")
+            print(f"NEW SIGNAL → {signal['symbol']} {signal['direction']} {actual_leverage}x – ${usdt_amount:.0f}")
             await execute_trade(client_bingx, signal, usdt_amount, leverage=actual_leverage, config=config)
 
             traded_hashes.add(signal_hash)
