@@ -1,4 +1,4 @@
-# main.py – FINAL ×10 BOT – 100% CRASH-PROOF BALANCE + CLEAN STARTUP
+# main.py – FINAL ×10 BOT – TINY/NORMAL MODE + NO SYNTAX ERRORS
 import asyncio
 import hashlib
 from api import bingx_api_request
@@ -23,45 +23,17 @@ config = get_config()
 
 async def get_balance():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'], client_bingx['secret_key'])
-    if resp.get('code') == 0:
-        data = resp.get('data')
-        if data:
-            # Handle both list and dict structures
-            if isinstance(data, list) and len(data) > 0:
-                item = data[0]
-                if 'balance' in item:
-                    return float(item['balance'].get('availableBalance', 6000))
-                return float(item.get('availableBalance', 6000))
-            elif isinstance(data, dict):
-                return float(data.get('availableBalance', 6000))
+    if resp.get('code') == 0 and resp.get('data'):
+        bal = resp['data'][0].get('balance', {}).get('availableBalance')
+        if bal is not None:
+            return float(bal)
     return 6000.0
-
-async def print_startup_info():
-    balance = await get_balance()
-    usdt_amount = balance * (config['usdt_per_trade_percent'] / 100)
-    if test:
-        usdt_amount = max(1.0, min(9.0, usdt_amount))
-
-    print("STARTUP SUMMARY")
-    print("-" * 50)
-    print(f"Available Balance : ${balance:,.2f}")
-    if test:
-        print("Trade Size        : $1–$9 (tiny mode)")
-    else:
-        print(f"Trade Size        : {config['usdt_per_trade_percent']}% (~${usdt_amount:,.0f})")
-    print(f"Leverage          : {'1x–2x' if test else '10x'}")
-    print(f"Max Open Positions: {config['max_open_positions']}")
-    print(f"TP Split          : {config['tp1_close_percent']}% / {config['tp2_close_percent']}% / {config['tp3_close_percent']}% / {config['tp4_close_percent']}%")
-    print(f"Trailing Stop     : After TP2 – {config['trailing_callback_rate']}% callback")
-    print(f"Stop Loss         : Max {config['stop_loss_percent']}%")
-    print("-" * 50 + "\n")
 
 async def get_open_positions_count():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/trade/position', client_bingx['api_key'], client_bingx['secret_key'])
     return len(resp.get('data', [])) if resp.get('code') == 0 else 0
 
 async def main_loop():
-    await print_startup_info()
     print("×10 BOT STARTED – Waiting for new signals...\n")
     traded_hashes = set()
 

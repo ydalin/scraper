@@ -1,4 +1,4 @@
-# trade.py – FINAL ×10 EXECUTION – CORRECT SYMBOL FORMAT: SYMBOL-USDT
+# trade.py – FINAL ×10 EXECUTION – NO SYNTAX ERRORS, SYMBOL-USDT, NO positionSide
 from api import bingx_api_request
 
 async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, dry_run=False):
@@ -6,9 +6,11 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         from config import get_config
         config = get_config()
 
-    # FIX: BingX now requires SYMBOL-USDT format (e.g. BTC-USDT)
-    raw_symbol = signal['symbol'].upper()           # e.g. BTC/USDT or BTCUSDT
-    symbol = raw_symbol.replace('/', '-')
+    # Symbol fix: BTC/USDT or BTCUSDT → BTC-USDT (BingX current requirement)
+    symbol_raw = signal['symbol'].upper()
+    symbol = symbol_raw.replace('/', '-').replace('USDT', '-USDT') if '-' not in symbol_raw else symbol_raw
+    if not symbol.endswith('-USDT'):
+        symbol = symbol.replace('USDT', '') + '-USDT'
 
     direction = signal['direction']
     entry = signal['entry']
@@ -19,24 +21,28 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         print(f"[DRY RUN] Would open {direction} {symbol} {leverage}x ${usdt_amount:.2f}")
         return
 
+    # Calculate quantity
     qty = round((usdt_amount * leverage) / entry, 6)
 
     # Set leverage & isolated mode
     await bingx_api_request('POST', '/openApi/swap/v2/trade/leverage', client['api_key'], client['secret_key'], data={
-        'symbol': symbol, 'side': 'BOTH', 'leverage': leverage
-    })
-    await bingx_api_request('POST', '/openApi/swap/v2/trade/marginType', client['api_key'], client['secret_key'], data={
-        'symbol': symbol, 'marginType': 'ISOLATED'
+        'symbol': symbol,
+        'side': 'BOTH',
+        'leverage': leverage
     })
 
-    # Entry order
+    await bingx_api_request('POST', '/openApi/swap/v2/trade/marginType', client['api_key'], client['secret_key'], data={
+        'symbol': symbol,
+        'marginType': 'ISOLATED'
+    })
+
+    # Entry order – NO positionSide (causes error in One-Way mode)
     side = 'BUY' if direction == 'LONG' else 'SELL'
     opposite = 'SELL' if direction == 'LONG' else 'BUY'
 
     entry_payload = {
         'symbol': symbol,
         'side': side,
-        'positionSide': 'BOTH',
         'type': 'LIMIT',
         'quantity': f"{qty:.6f}",
         'price': str(entry),
@@ -57,7 +63,6 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         tp_payload = {
             'symbol': symbol,
             'side': opposite,
-            'positionSide': 'BOTH',
             'type': 'TAKE_PROFIT_MARKET',
             'quantity': f"{tp_qty:.6f}",
             'stopPrice': str(tp),
@@ -72,7 +77,6 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         trail_payload = {
             'symbol': symbol,
             'side': opposite,
-            'positionSide': 'BOTH',
             'type': 'TRAILING_STOP_MARKET',
             'quantity': f"{remaining_qty:.6f}",
             'callbackRate': str(config['trailing_callback_rate']),
@@ -86,7 +90,6 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     sl_payload = {
         'symbol': symbol,
         'side': opposite,
-        'positionSide': 'BOTH',
         'type': 'STOP_MARKET',
         'quantity': f"{qty:.6f}",
         'stopPrice': str(stoploss),
