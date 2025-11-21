@@ -1,7 +1,13 @@
-# trade.py – LIMIT entry with timeout + cancel + TP/SL/trailing
+# trade.py – LIMIT entry with hybrid fill detection, timeout + cancel + TP/SL/trailing
+
 import asyncio
 import time
 from api import bingx_api_request
+
+
+def _normalize_symbol(sym: str) -> str:
+    """Normalize symbol to compare exchange symbols consistently."""
+    return sym.replace("-", "").replace("/", "").upper()
 
 
 def format_qty(qty: float) -> str:
@@ -9,19 +15,55 @@ def format_qty(qty: float) -> str:
     return f"{qty:.6f}".rstrip("0").rstrip(".")
 
 
+async def _symbol_is_tradable(client, symbol: str) -> bool:
+    """
+    Check if a symbol is tradable on BingX swap by calling getSymbolLeverage.
+    If the check fails or returns error, we treat it as NOT tradable to stay safe.
+    """
+    symbol = symbol.upper()
+    try:
+        resp = await bingx_api_request(
+            "GET",
+            "/openApi/swap/v2/market/getSymbolLeverage",
+            client["api_key"],
+            client["secret_key"],
+            params={"symbol": symbol},
+        )
+    except Exception as e:
+        print(f"[SYMBOL CHECK] Error checking leverage for {symbol}: {e}")
+        return False
+
+    code = resp.get("code")
+    data = resp.get("data")
+
+    if code == 0 and data:
+        print(f"[SYMBOL CHECK] {symbol} is tradable on swap.")
+        return True
+
+    print(f"[SYMBOL CHECK] {symbol} NOT tradable or API error: {resp}")
+    return False
+
+
 async def _get_position_size(client, symbol: str) -> float:
     """
     Query current position size for a symbol.
     Returns absolute size (>=0), or 0.0 if none.
+    Uses normalized symbol matching to handle PIXEL-USDT vs PIXELUSDT.
     """
     symbol = symbol.upper()
-    resp = await bingx_api_request(
-        "GET",
-        "/openApi/swap/v2/trade/position",
-        client["api_key"],
-        client["secret_key"],
-        params={"symbol": symbol},
-    )
+    norm_symbol = _normalize_symbol(symbol)
+
+    try:
+        resp = await bingx_api_request(
+            "GET",
+            "/openApi/swap/v2/trade/position",
+            client["api_key"],
+            client["secret_key"],
+            params={"symbol": symbol},
+        )
+    except Exception as e:
+        print(f"[POS] Error fetching position for {symbol}: {e}")
+        return 0.0
 
     if resp.get("code") != 0:
         return 0.0
@@ -33,7 +75,8 @@ async def _get_position_size(client, symbol: str) -> float:
         positions = data
 
     for pos in positions:
-        if str(pos.get("symbol", "")).upper() != symbol:
+        pos_sym = str(pos.get("symbol", "")).upper()
+        if _normalize_symbol(pos_sym) != norm_symbol:
             continue
 
         size = 0.0
@@ -59,49 +102,111 @@ async def _get_position_size(client, symbol: str) -> float:
     return 0.0
 
 
-async def _wait_for_fill_with_deadline(
+async def _get_order_status(client, symbol: str, order_id: str) -> str:
+    """
+    Query order status for a specific order.
+    Returns status string (e.g. 'NEW', 'FILLED', 'PARTIALLY_FILLED', etc.) or '' on error.
+    """
+    symbol = symbol.upper()
+    try:
+        resp = await bingx_api_request(
+            "GET",
+            "/openApi/swap/v2/trade/order",
+            client["api_key"],
+            client["secret_key"],
+            params={"symbol": symbol, "orderId": str(order_id)},
+        )
+    except Exception as e:
+        print(f"[ORDER] Error fetching order status for {symbol} {order_id}: {e}")
+        return ""
+
+    if resp.get("code") != 0:
+        return ""
+
+    data = resp.get("data") or {}
+    if isinstance(data, list) and data:
+        data = data[0]
+
+    status = str(data.get("status", "")).upper()
+    return status
+
+
+async def _wait_for_fill_hybrid(
     client,
     symbol: str,
+    order_id: str,
     intended_qty: float,
     threshold: float,
     timeout: int,
     poll_interval: int = 2,
 ) -> float:
     """
-    Wait until |position_size| >= threshold * intended_qty, or timeout.
-    Returns the *last seen* position size (may be 0 if nothing filled).
+    Hybrid wait: use BOTH order status and position size.
+
+    We consider the entry "good enough" when:
+      - position_size >= threshold * intended_qty, OR
+      - order is FILLED and a non-zero position appears.
+
+    Returns the detected position size (>=0). If zero at timeout → treat as failed.
     """
+    symbol = symbol.upper()
     start = time.time()
     last_size = 0.0
     print(
-        f"[WAIT] Waiting for near-full fill on {symbol}: "
-        f">= {threshold * 100:.1f}% of {intended_qty:.6f} (timeout {timeout}s)"
+        f"[WAIT] Hybrid fill check for {symbol}: "
+        f"threshold={threshold * 100:.1f}% of {intended_qty:.6f}, timeout={timeout}s"
     )
 
     while time.time() - start < timeout:
+        # Check order status
+        status = await _get_order_status(client, symbol, order_id)
+        if status:
+            print(f"[WAIT] Order {order_id} status: {status}")
+
+        # Check position size
         size = await _get_position_size(client, symbol)
         last_size = size
-        if size >= intended_qty * threshold:
+        if size > 0:
+            print(f"[WAIT] Current position size for {symbol}: {size:.6f}")
+
+        target = intended_qty * threshold
+
+        # If position big enough, accept
+        if size >= target and size > 0:
             print(
-                f"[WAIT] Position near-full: size={size:.6f} "
-                f"(intended={intended_qty:.6f})"
+                f"[WAIT] Position >= threshold: size={size:.6f}, "
+                f"needed>={target:.6f}"
+            )
+            return size
+
+        # If order is FILLED and we see any position, accept
+        if status == "FILLED" and size > 0:
+            print(
+                f"[WAIT] Order FILLED and position present: size={size:.6f}, "
+                f"intended={intended_qty:.6f}"
             )
             return size
 
         await asyncio.sleep(poll_interval)
 
     print(
-        f"[WAIT] Near-full fill not reached for {symbol} within {timeout}s. "
-        f"Last size={last_size:.6f}"
+        f"[WAIT] Hybrid fill timeout for {symbol}. "
+        f"Last position size={last_size:.6f}"
     )
     return last_size
 
 
-async def _cancel_order(client, symbol: str, order_id):
-    """Cancel a specific order by symbol + orderId."""
+async def _cancel_order(client, symbol: str, order_id, side: str, order_type: str, position_side: str = "BOTH"):
+    """
+    Cancel a specific order by symbol + orderId.
+    BingX error earlier showed we must also provide side, type, positionSide.
+    """
     payload = {
         "symbol": symbol.upper(),
         "orderId": str(order_id),
+        "side": side,
+        "type": order_type,
+        "positionSide": position_side,
     }
     print(f"[CANCEL] Canceling order {order_id} for {symbol} with payload: {payload}")
     resp = await bingx_api_request(
@@ -152,12 +257,13 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     Execute a trade based on a Telegram signal.
 
     - Uses MARKET or LIMIT based on config["order_type"].
+    - Symbol is validated first via getSymbolLeverage.
     - If LIMIT:
         * place limit entry
-        * wait up to limit_fill_timeout_seconds for near-full fill
+        * hybrid wait (order status + position size) up to timeout
         * if not filled enough: cancel order, close any partial at market, stop.
         * if filled enough: place TP/SL/trailing normally.
-    - If MARKET: place TP/SL/trailing immediately (no polling).
+    - If MARKET: place TP/SL/trailing immediately (no waiting).
     """
     if config is None:
         from config import get_config
@@ -168,6 +274,11 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     entry = float(signal["entry"])
     targets = [float(t) for t in signal["targets"][:4]]
     stoploss = float(signal["stoploss"])
+
+    # Validate symbol is tradable on swap
+    if not await _symbol_is_tradable(client, symbol):
+        print(f"[SKIP] {symbol} is not tradable on swap. Skipping signal.")
+        return
 
     # Position size from USDT, leverage, entry
     qty = (usdt_amount * leverage) / entry
@@ -181,9 +292,9 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     if order_type not in ("MARKET", "LIMIT"):
         order_type = "MARKET"
 
-    # LIMIT fill behavior from config (with defaults)
-    fill_threshold = float(config.get("limit_fill_threshold", 0.99))  # 99% by default
-    fill_timeout = int(config.get("limit_fill_timeout_seconds", 60))  # 60s default
+    # LIMIT fill behavior from config (with safer defaults)
+    fill_threshold = float(config.get("limit_fill_threshold", 0.01))  # 1% by default
+    fill_timeout = int(config.get("limit_fill_timeout_seconds", 180))  # 180s default
 
     print("======================================================================")
     print(f"EXECUTING TRADE for {symbol}")
@@ -228,19 +339,19 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         print(f"[ENTRY ERROR] {entry_resp.get('msg')}")
         return
 
-    # Extract orderId for potential cancel
+    # Extract orderId (may be needed for cancel / status)
     order_data = (entry_resp.get("data") or {}).get("order") or {}
     entry_order_id = order_data.get("orderId") or order_data.get("orderID")
 
     # Decide effective quantity:
-    # - MARKET: assume full intended qty
-    # - LIMIT: wait for near-full fill and use the detected size
     effective_qty = qty
 
     if order_type == "LIMIT":
-        filled_size = await _wait_for_fill_with_deadline(
+        # Hybrid wait for fill
+        filled_size = await _wait_for_fill_hybrid(
             client,
             symbol,
+            str(entry_order_id) if entry_order_id is not None else "",
             qty,
             threshold=fill_threshold,
             timeout=fill_timeout,
@@ -248,8 +359,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
 
         target_size = qty * fill_threshold
 
-        if filled_size >= target_size:
-            # Good: position is filled enough
+        if filled_size >= target_size and filled_size > 0:
             effective_qty = filled_size
             print(
                 f"[INFO] LIMIT entry sufficiently filled: {filled_size:.6f} "
@@ -262,7 +372,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
                 f"filled_size={filled_size:.6f}, needed>={target_size:.6f}"
             )
             if entry_order_id is not None:
-                await _cancel_order(client, symbol, entry_order_id)
+                await _cancel_order(client, symbol, entry_order_id, side, order_type, "BOTH")
 
             if filled_size > 0:
                 # Close any partial position at market for safety
@@ -270,6 +380,17 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
 
             print("[INFO] Exiting without placing TP/SL/trailing.")
             return
+
+    else:
+        # MARKET entry: if API returned executedQty, we can use that as effective_qty
+        executed = order_data.get("executedQty")
+        try:
+            if executed is not None:
+                executed_f = float(executed)
+                if executed_f > 0:
+                    effective_qty = executed_f
+        except Exception:
+            pass
 
     eff_qty_str = format_qty(effective_qty)
     print(f"[INFO] Using effective_qty={eff_qty_str} for exits.")
