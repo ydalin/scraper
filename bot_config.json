@@ -10,5 +10,5 @@
     "tp4_close_percent": 15.0,
     "dry_run_mode": false,
     "trail_sl_on_tp": 2,
-    "max_allowed_leverage": 50
+    "max_allowed_leverage": 1
 }
