@@ -14,7 +14,7 @@ DEFAULT_CONFIG = {
     # --- Risk limits ---
     "max_open_positions": 14,
     "max_trades_per_day": 20,
-    "max_leverage": 10,
+    "max_leverage": 1,
 
     # --- Loop ---
     "check_interval_seconds": 8,
