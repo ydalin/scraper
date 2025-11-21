@@ -8,7 +8,7 @@ import asyncio
 import hashlib
 import getpass
 import re
-
+from trade import execute_trade
 from api import bingx_api_request
 from bot_telegram import parse_signal, init_telegram, read_credentials
 import bot_telegram
