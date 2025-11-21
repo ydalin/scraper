@@ -8,7 +8,7 @@ CONFIG_FILE = "bot_config.json"
 DEFAULT_CONFIG = {
     # --- Position sizing ---
     "usdt_per_trade_percent": 5.8,
-    "use_absolute_usdt": False,
+    "use_absolute_usdt": True,
     "absolute_usdt_per_trade": 5.0,
 
     # --- Risk limits ---
