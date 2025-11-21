@@ -224,29 +224,37 @@ async def _wait_for_fill_hybrid(
 
 async def _cancel_order(client, symbol, order_id, side, order_type, position_side="BOTH"):
     """
-    Cancel a specific order by symbol + orderId.
+    Cancel open orders for a given symbol.
 
-    Use BingX's dedicated cancel endpoint instead of DELETE /trade/order,
-    which is for modifying orders (and requires quantity/price).
+    BingX Perpetual Futures v2 does not expose a simple
+    "cancel single order" endpoint, but it *does* provide
+    /openApi/swap/v2/trade/allOpenOrders to cancel all open
+    orders for a symbol.
+
+    For our use-case ("limit entry didn’t fill, clean it up"),
+    it's perfectly fine (and safer) to cancel all open orders
+    on that symbol.
+
+    NOTE: order_id, side, order_type, position_side are kept
+    in the signature for compatibility with existing calls,
+    but are not used.
     """
-    if not order_id:
-        return
-
+    sym = symbol.upper()
     payload = {
-        "symbol": symbol.upper(),
-        "orderId": str(order_id),
+        "symbol": sym,
     }
-    print(f"[CANCEL] Canceling order {order_id} for {symbol} with payload: {payload}")
 
-    # Use the cancel endpoint
+    print("[CANCEL] Canceling ALL open orders for %s with payload: %s" % (sym, payload))
+
     resp = await bingx_api_request(
         "POST",
-        "/openApi/swap/v2/trade/cancel",
+        "/openApi/swap/v2/trade/allOpenOrders",
         client["api_key"],
         client["secret_key"],
         params=payload,
     )
-    print(f"[CANCEL] RESPONSE: {resp}")
+
+    print("[CANCEL] RESPONSE: %s" % resp)
     return resp
 
 
