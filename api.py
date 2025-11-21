@@ -1,4 +1,5 @@
 # api.py – Simple, correct BingX REST wrapper (no file read for secret)
+from __future__ import annotations
 
 import requests
 import hmac
