@@ -96,6 +96,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     - Uses MARKET or LIMIT based on config["order_type"].
     - If LIMIT: waits until ~99% of position is filled before placing TP/SL/trailing.
     - If MARKET: places exits immediately (position assumed to be filled).
+    - One-Way mode: positionSide = BOTH on all orders.
     """
     if config is None:
         from config import get_config
@@ -133,6 +134,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     entry_payload = {
         "symbol": symbol,
         "side": side,
+        "positionSide": "BOTH",          # REQUIRED in One-Way mode
         "type": order_type,
         "quantity": qty_str,
         "workingType": "MARK_PRICE",
@@ -197,6 +199,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         tp_payload = {
             "symbol": symbol,
             "side": opposite,
+            "positionSide": "BOTH",
             "type": "TAKE_PROFIT_MARKET",
             "quantity": tp_qty_str,
             "stopPrice": str(tp_price),
@@ -230,6 +233,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
             trail_payload = {
                 "symbol": symbol,
                 "side": opposite,
+                "positionSide": "BOTH",
                 "type": "TRAILING_STOP_MARKET",
                 "quantity": trail_qty_str,
                 "activationPrice": str(activation_price),
@@ -256,6 +260,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     sl_payload = {
         "symbol": symbol,
         "side": opposite,
+        "positionSide": "BOTH",
         "type": "STOP_MARKET",
         "quantity": eff_qty_str,
         "stopPrice": str(stoploss),
