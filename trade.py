@@ -225,7 +225,9 @@ async def _wait_for_fill_hybrid(
 async def _cancel_order(client, symbol, order_id, side, order_type, position_side="BOTH"):
     """
     Cancel a specific order by symbol + orderId.
-    BingX may require side, type, positionSide on cancel.
+
+    Use BingX's dedicated cancel endpoint instead of DELETE /trade/order,
+    which is for modifying orders (and requires quantity/price).
     """
     if not order_id:
         return
@@ -233,20 +235,20 @@ async def _cancel_order(client, symbol, order_id, side, order_type, position_sid
     payload = {
         "symbol": symbol.upper(),
         "orderId": str(order_id),
-        "side": side,
-        "type": order_type,
-        "positionSide": position_side,
     }
-    print("[CANCEL] Canceling order %s for %s with payload: %s" % (order_id, symbol, payload))
+    print(f"[CANCEL] Canceling order {order_id} for {symbol} with payload: {payload}")
+
+    # Use the cancel endpoint
     resp = await bingx_api_request(
-        "DELETE",
-        "/openApi/swap/v2/trade/order",
+        "POST",
+        "/openApi/swap/v2/trade/cancel",
         client["api_key"],
         client["secret_key"],
         params=payload,
     )
-    print("[CANCEL] RESPONSE: %s" % resp)
+    print(f"[CANCEL] RESPONSE: {resp}")
     return resp
+
 
 
 async def _close_position_market(client, symbol, direction, qty):
