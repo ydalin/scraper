@@ -24,7 +24,7 @@ DEFAULT_CONFIG = {
     "margin_mode": "ISOLATED",
 
     # --- ENTRY TYPE ---  (you requested MARKET)
-    "order_type": "MARKET",
+    "order_type": "LIMIT",
 
     # --- TP split ---
     "tp1_close_percent": 35.0,

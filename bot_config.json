@@ -3,7 +3,7 @@
     "max_trades_per_day": 12,
     "check_interval_seconds": 6,
     "position_mode": "Isolated",
-    "order_type": "MARKET",
+    "order_type": "LIMIT",
     "tp1_close_percent": 35.0,
     "tp2_close_percent": 30.0,
     "tp3_close_percent": 20.0,
