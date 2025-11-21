@@ -1,200 +1,175 @@
-# trade.py – SYMBOL-USDT, hedge-mode safe, trailing stop + reduceOnly on all exits
+import math
 from api import bingx_api_request
 
 
-async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, dry_run=False):
-    """Execute a trade on BingX based on a parsed signal.
+def format_qty(qty):
+    """Formats quantity with up to 6 decimals (common for futures)."""
+    return f"{qty:.6f}".rstrip("0").rstrip(".")
 
-    client: dict with 'api_key' and 'secret_key'
-    signal: dict with keys: symbol, direction ('LONG'/'SHORT'), entry (float),
-            targets (list[float]), stoploss (float)
-    usdt_amount: how many USDT to allocate (not notional after leverage)
-    leverage: leverage multiplier
-    config: optional config dict (if None, loaded from config.get_config())
-    dry_run: if True, no orders are sent regardless of config.dry_run_mode
-    """
-    if config is None:
-        from config import get_config
-        config = get_config()
 
-    # Effective dry-run: either explicit or via config flag
-    effective_dry_run = dry_run or config.get("dry_run_mode", False)
+async def execute_trade(client, signal, usdt_amount, leverage=10,
+                        config=None, dry_run=False):
+    api_key = client["api_key"]
+    secret_key = client["secret_key"]
 
-    # BingX uses AAA-BBB format for symbols (e.g. BTC-USDT)
-    # parse_signal gives e.g. "BTC/USDT"
-    symbol = signal["symbol"].upper().replace("/", "-")
+    symbol = signal["symbol"].replace("/", "-")
+    direction = signal["direction"].upper()
+    entry_price = float(signal["entry"])
+    stop_loss = float(signal["stoploss"])
 
-    direction = signal["direction"].upper()   # LONG / SHORT
-    entry = float(signal["entry"])
-    targets = [float(t) for t in signal["targets"]]
-    stoploss = float(signal["stoploss"])
+    qty = (usdt_amount * leverage) / entry_price
+    qty_str = format_qty(qty)
 
-    # side = action (BUY/SELL), positionSide = LONG/SHORT (hedge mode)
-    side = "BUY" if direction == "LONG" else "SELL"
-    opposite = "SELL" if direction == "LONG" else "BUY"
-    position_side = "LONG" if direction == "LONG" else "SHORT"
+    position_side = "BOTH"
 
-    if effective_dry_run:
-        print(f"[DRY RUN] Would open {direction} {symbol} {leverage}x with ${usdt_amount:.2f}")
-        print(f"  Entry: {entry}, Targets: {targets}, Stop: {stoploss}")
-        return
+    if direction == "LONG":
+        entry_side = "BUY"
+        exit_side = "SELL"
+    else:
+        entry_side = "SELL"
+        exit_side = "BUY"
 
-    # Position size in base asset
-    qty = round((usdt_amount * leverage) / entry, 6)
-
-    # Set leverage & isolated mode
-    await bingx_api_request(
-        "POST",
-        "/openApi/swap/v2/trade/leverage",
-        client["api_key"],
-        client["secret_key"],
-        data={"symbol": symbol, "side": "BOTH", "leverage": leverage},
-    )
-    await bingx_api_request(
-        "POST",
-        "/openApi/swap/v2/trade/marginType",
-        client["api_key"],
-        client["secret_key"],
-        data={"symbol": symbol, "marginType": "ISOLATED"},
-    )
-
-    # ---------------- ENTRY ORDER ----------------
-    entry_payload = {
-        "symbol": symbol,               # e.g. BTC-USDT
-        "side": side,                   # BUY / SELL
-        "positionSide": position_side,  # LONG / SHORT (required in hedge mode)
+    entry_order = {
+        "symbol": symbol,
+        "side": entry_side,
+        "positionSide": position_side,
         "type": "LIMIT",
-        "quantity": f"{qty:.6f}",
-        "price": str(entry),
+        "quantity": qty_str,
+        "price": str(entry_price),
         "timeInForce": "GTC",
         "workingType": "MARK_PRICE",
     }
-    print("ENTRY ORDER:", entry_payload)
-    entry_resp = await bingx_api_request(
+
+    print(f"ENTRY ORDER: {entry_order}")
+
+    if dry_run:
+        print("DRY RUN → Entry not sent.")
+        return
+
+    entry_response = await bingx_api_request(
         "POST",
         "/openApi/swap/v2/trade/order",
-        client["api_key"],
-        client["secret_key"],
-        data=entry_payload,
+        api_key,
+        secret_key,
+        entry_order,
     )
-    print("ENTRY RESPONSE:", entry_resp)
+    print(f"ENTRY RESPONSE: {entry_response}")
 
-    # If entry failed, stop here
-    if entry_resp.get("code") != 0:
+    if entry_response.get("code") != 0:
         print("ENTRY FAILED, aborting TPs/SL/trailing.")
         return
 
-    # ---------------- TAKE PROFITS ----------------
-    tp_percents = [
-        config.get("tp1_close_percent", 0),
-        config.get("tp2_close_percent", 0),
-        config.get("tp3_close_percent", 0),
-        config.get("tp4_close_percent", 0),
-    ]
+    tp1_pct = float(config["tp1_close_percent"])
+    tp2_pct = float(config["tp2_close_percent"])
+    tp3_pct = float(config["tp3_close_percent"])
+    tp4_pct = float(config["tp4_close_percent"])
 
-    total_tp_perc = 0.0
-    for i, tp_price in enumerate(targets[:4]):
-        percent = float(tp_percents[i]) if i < len(tp_percents) else 0.0
-        if percent <= 0:
-            continue
-        total_tp_perc += percent
-        tp_qty = round(qty * (percent / 100.0), 6)
+    def pct_qty(p):
+        return format_qty(qty * p / 100)
 
-        tp_payload = {
+    tp1_qty = pct_qty(tp1_pct)
+    tp2_qty = pct_qty(tp2_pct)
+    tp3_qty = pct_qty(tp3_pct)
+    tp4_qty = pct_qty(tp4_pct)
+
+    tp_prices = signal["targets"]
+
+    for idx, (tp_price, tp_qty) in enumerate(
+        [
+            (tp_prices[0], tp1_qty),
+            (tp_prices[1], tp2_qty),
+            (tp_prices[2], tp3_qty),
+            (tp_prices[3], tp4_qty),
+        ],
+        start=1,
+    ):
+        tp_order = {
             "symbol": symbol,
-            "side": opposite,
+            "side": exit_side,
             "positionSide": position_side,
             "type": "TAKE_PROFIT_MARKET",
-            "quantity": f"{tp_qty:.6f}",
+            "quantity": tp_qty,
             "stopPrice": str(tp_price),
             "workingType": "MARK_PRICE",
-            "reduceOnly": "true",  # close-only
         }
-        print(f"TP{i+1} ORDER:", tp_payload)
-        tp_resp = await bingx_api_request(
+
+        print(f"TP{idx} ORDER: {tp_order}")
+
+        if dry_run:
+            print(f"DRY RUN → TP{idx} not sent.")
+            continue
+
+        tp_res = await bingx_api_request(
             "POST",
             "/openApi/swap/v2/trade/order",
-            client["api_key"],
-            client["secret_key"],
-            data=tp_payload,
+            api_key,
+            secret_key,
+            tp_order,
         )
-        print(f"TP{i+1} RESPONSE:", tp_resp)
+        print(f"TP{idx} RESPONSE: {tp_res}")
 
-    # ---------------- TRAILING STOP (optional) ----------------
-    trailing_mode = config.get("trailing_stop_mode", "from_tp")
+    trailing_tp = int(config["trailing_activate_after_tp"])
+    callback_rate = float(config["trailing_callback_rate"]) / 100.0
 
-    if trailing_mode != "none":
-        # Remaining percentage after all TPs (if sum < 100)
-        remaining_pct = max(0.0, 100.0 - float(total_tp_perc))
-        if remaining_pct > 0:
-            trailing_qty = round(qty * (remaining_pct / 100.0), 6)
+    if trailing_tp in (1, 2, 3, 4):
+        used_pct = tp1_pct + tp2_pct + tp3_pct + tp4_pct
+        remain_pct = max(0, 100 - used_pct)
 
-            # Decide activation price
-            if trailing_mode == "from_tp":
-                tp_index = int(config.get("trailing_activate_after_tp", 4))
-                tp_index = max(1, min(4, tp_index))
-                idx = min(tp_index - 1, len(targets) - 1)
-                activation = targets[idx]
-            elif trailing_mode == "from_entry":
-                activation = entry
-            else:
-                print(f"Unknown trailing_stop_mode={trailing_mode}, skipping trailing stop.")
-                activation = None
+        if remain_pct > 0:
+            trail_qty = qty * remain_pct / 100
+            trail_qty_str = format_qty(trail_qty)
 
-            if activation is not None:
-                trail_payload = {
-                    "symbol": symbol,
-                    "side": opposite,
-                    "positionSide": position_side,
-                    "quantity": f"{trailing_qty:.6f}",
+            activation_price = tp_prices[trailing_tp - 1]
 
-                    # BingX trailing parameters
-                    "callbackRate": str(config.get("trailing_callback_rate", 0.5) / 100),
-                    # e.g. config 1.3 → 0.013 (1.3%)
+            trail_order = {
+                "symbol": symbol,
+                "side": exit_side,
+                "positionSide": position_side,
+                "type": "TRAILING_STOP_MARKET",
+                "quantity": trail_qty_str,
+                "activationPrice": str(activation_price),
+                "callbackRate": str(callback_rate),
+                "workingType": "MARK_PRICE",
+            }
 
-                    "activationPrice": str(activation),
+            print(f"TRAILING STOP ORDER: {trail_order}")
 
-                    "type": "TRAILING_STOP_MARKET",
-                    "workingType": "MARK_PRICE",
-                    "reduceOnly": "true",
-                }
-
-                print(f"TRAILING STOP ({trailing_mode}) ORDER:", trail_payload)
-
-                trail_resp = await bingx_api_request(
+            if not dry_run:
+                trail_res = await bingx_api_request(
                     "POST",
-                    "/openApi/swap/v2/trade/order/trailingStop",
-                    client["api_key"],
-                    client["secret_key"],
-                    data=trail_payload,
+                    "/openApi/swap/v2/trade/order",
+                    api_key,
+                    secret_key,
+                    trail_order,
                 )
-
-                print("TRAILING STOP RESPONSE:", trail_resp)
-
+                print(f"TRAILING RESPONSE: {trail_res}")
         else:
-            print("No remaining quantity for trailing stop (TP percents sum to 100 or more).")
+            print("No remaining quantity for trailing stop.")
     else:
-        print("Trailing stop disabled by config (trailing_stop_mode='none').")
+        print("Trailing stop disabled (invalid TP index).")
 
-    # ---------------- STOP LOSS ----------------
-    sl_payload = {
+    sl_order = {
         "symbol": symbol,
-        "side": opposite,
+        "side": exit_side,
         "positionSide": position_side,
         "type": "STOP_MARKET",
-        "quantity": f"{qty:.6f}",
-        "stopPrice": str(stoploss),
+        "quantity": qty_str,
+        "stopPrice": str(stop_loss),
         "workingType": "MARK_PRICE",
-        "reduceOnly": "true",
     }
-    print("STOP LOSS ORDER:", sl_payload)
-    sl_resp = await bingx_api_request(
-        "POST",
-        "/openApi/swap/v2/trade/order",
-        client["api_key"],
-        client["secret_key"],
-        data=sl_payload,
-    )
-    print("STOP LOSS RESPONSE:", sl_resp)
 
-    print(f"REAL TRADE EXECUTED: {symbol} {direction} {leverage}x – ${usdt_amount:.2f}")
+    print(f"STOP LOSS ORDER: {sl_order}")
+
+    if not dry_run:
+        sl_res = await bingx_api_request(
+            "POST",
+            "/openApi/swap/v2/trade/order",
+            api_key,
+            secret_key,
+            sl_order,
+        )
+        print(f"STOP LOSS RESPONSE: {sl_res}")
+
+    print(
+        f"REAL TRADE EXECUTED: {symbol} {direction} {leverage}x – ${usdt_amount:.2f}"
+    )
