@@ -8,13 +8,13 @@ CONFIG_FILE = "bot_config.json"
 DEFAULT_CONFIG = {
     # --- Position sizing ---
     "usdt_per_trade_percent": 5.8,
-    "use_absolute_usdt": True,
+    "use_absolute_usdt": True, # EDITED
     "absolute_usdt_per_trade": 5.0,
 
     # --- Risk limits ---
     "max_open_positions": 14,
     "max_trades_per_day": 20,
-    "max_leverage": 1,
+    "max_leverage": 1, #EDITED
 
     # --- Loop ---
     "check_interval_seconds": 8,

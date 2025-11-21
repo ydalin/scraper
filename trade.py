@@ -1,11 +1,11 @@
-# trade.py – LIMIT-aware with near-full fill polling + TP/SL/trailing
+# trade.py – LIMIT entry with timeout + cancel + TP/SL/trailing
 import asyncio
 import time
 from api import bingx_api_request
 
 
 def format_qty(qty: float) -> str:
-    """Format quantity with up to 6 decimals."""
+    """Format quantity with up to 6 decimals, strip trailing zeros."""
     return f"{qty:.6f}".rstrip("0").rstrip(".")
 
 
@@ -59,19 +59,20 @@ async def _get_position_size(client, symbol: str) -> float:
     return 0.0
 
 
-async def _wait_for_near_full_fill(
+async def _wait_for_fill_with_deadline(
     client,
     symbol: str,
     intended_qty: float,
-    threshold: float = 0.99,
-    timeout: int = 60,
+    threshold: float,
+    timeout: int,
     poll_interval: int = 2,
 ) -> float:
     """
     Wait until |position_size| >= threshold * intended_qty, or timeout.
-    Returns the detected position size (abs), or 0.0 if not reached.
+    Returns the *last seen* position size (may be 0 if nothing filled).
     """
     start = time.time()
+    last_size = 0.0
     print(
         f"[WAIT] Waiting for near-full fill on {symbol}: "
         f">= {threshold * 100:.1f}% of {intended_qty:.6f} (timeout {timeout}s)"
@@ -79,14 +80,71 @@ async def _wait_for_near_full_fill(
 
     while time.time() - start < timeout:
         size = await _get_position_size(client, symbol)
+        last_size = size
         if size >= intended_qty * threshold:
-            print(f"[WAIT] Position near-full: size={size:.6f} (intended={intended_qty:.6f})")
+            print(
+                f"[WAIT] Position near-full: size={size:.6f} "
+                f"(intended={intended_qty:.6f})"
+            )
             return size
 
         await asyncio.sleep(poll_interval)
 
-    print(f"[WAIT] Near-full fill not reached for {symbol} within {timeout}s.")
-    return 0.0
+    print(
+        f"[WAIT] Near-full fill not reached for {symbol} within {timeout}s. "
+        f"Last size={last_size:.6f}"
+    )
+    return last_size
+
+
+async def _cancel_order(client, symbol: str, order_id):
+    """Cancel a specific order by symbol + orderId."""
+    payload = {
+        "symbol": symbol.upper(),
+        "orderId": str(order_id),
+    }
+    print(f"[CANCEL] Canceling order {order_id} for {symbol} with payload: {payload}")
+    resp = await bingx_api_request(
+        "DELETE",
+        "/openApi/swap/v2/trade/order",
+        client["api_key"],
+        client["secret_key"],
+        params=payload,
+    )
+    print(f"[CANCEL] RESPONSE: {resp}")
+    return resp
+
+
+async def _close_position_market(client, symbol: str, direction: str, qty: float):
+    """
+    Close an existing position at market for a given size.
+    direction: 'LONG'/'SHORT' for the *original* position direction.
+    """
+    if qty <= 0:
+        return
+
+    symbol = symbol.upper()
+    close_side = "SELL" if direction.upper() == "LONG" else "BUY"
+    qty_str = format_qty(qty)
+
+    payload = {
+        "symbol": symbol,
+        "side": close_side,
+        "positionSide": "BOTH",
+        "type": "MARKET",
+        "quantity": qty_str,
+        "workingType": "MARK_PRICE",
+    }
+    print(f"[CLOSE] Closing partial position at MARKET: {payload}")
+    resp = await bingx_api_request(
+        "POST",
+        "/openApi/swap/v2/trade/order",
+        client["api_key"],
+        client["secret_key"],
+        params=payload,
+    )
+    print(f"[CLOSE] RESPONSE: {resp}")
+    return resp
 
 
 async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, dry_run=False):
@@ -94,31 +152,38 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     Execute a trade based on a Telegram signal.
 
     - Uses MARKET or LIMIT based on config["order_type"].
-    - If LIMIT: waits until ~99% of position is filled before placing TP/SL/trailing.
-    - If MARKET: places exits immediately (position assumed to be filled).
-    - One-Way mode: positionSide = BOTH on all orders.
+    - If LIMIT:
+        * place limit entry
+        * wait up to limit_fill_timeout_seconds for near-full fill
+        * if not filled enough: cancel order, close any partial at market, stop.
+        * if filled enough: place TP/SL/trailing normally.
+    - If MARKET: place TP/SL/trailing immediately (no polling).
     """
     if config is None:
         from config import get_config
         config = get_config()
 
     symbol = signal["symbol"].upper().replace("/", "-")
-    direction = signal["direction"].upper()
+    direction = signal["direction"].upper()  # LONG / SHORT
     entry = float(signal["entry"])
     targets = [float(t) for t in signal["targets"][:4]]
     stoploss = float(signal["stoploss"])
 
-    # Compute intended quantity from USDT, leverage, entry
+    # Position size from USDT, leverage, entry
     qty = (usdt_amount * leverage) / entry
     qty_str = format_qty(qty)
 
     side = "BUY" if direction == "LONG" else "SELL"
     opposite = "SELL" if direction == "LONG" else "BUY"
 
-    # Entry order type from config: MARKET or LIMIT
+    # Entry order type from config
     order_type = str(config.get("order_type", "MARKET")).upper()
     if order_type not in ("MARKET", "LIMIT"):
         order_type = "MARKET"
+
+    # LIMIT fill behavior from config (with defaults)
+    fill_threshold = float(config.get("limit_fill_threshold", 0.99))  # 99% by default
+    fill_timeout = int(config.get("limit_fill_timeout_seconds", 60))  # 60s default
 
     print("======================================================================")
     print(f"EXECUTING TRADE for {symbol}")
@@ -134,7 +199,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     entry_payload = {
         "symbol": symbol,
         "side": side,
-        "positionSide": "BOTH",          # REQUIRED in One-Way mode
+        "positionSide": "BOTH",   # One-Way mode
         "type": order_type,
         "quantity": qty_str,
         "workingType": "MARK_PRICE",
@@ -163,20 +228,48 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         print(f"[ENTRY ERROR] {entry_resp.get('msg')}")
         return
 
+    # Extract orderId for potential cancel
+    order_data = (entry_resp.get("data") or {}).get("order") or {}
+    entry_order_id = order_data.get("orderId") or order_data.get("orderID")
+
     # Decide effective quantity:
     # - MARKET: assume full intended qty
     # - LIMIT: wait for near-full fill and use the detected size
     effective_qty = qty
 
     if order_type == "LIMIT":
-        filled_size = await _wait_for_near_full_fill(client, symbol, qty)
-        if filled_size <= 0:
+        filled_size = await _wait_for_fill_with_deadline(
+            client,
+            symbol,
+            qty,
+            threshold=fill_threshold,
+            timeout=fill_timeout,
+        )
+
+        target_size = qty * fill_threshold
+
+        if filled_size >= target_size:
+            # Good: position is filled enough
+            effective_qty = filled_size
             print(
-                "[INFO] LIMIT entry did not reach near-full fill. "
-                "TP/SL/trailing will NOT be placed; entry remains on book."
+                f"[INFO] LIMIT entry sufficiently filled: {filled_size:.6f} "
+                f"(>= {fill_threshold * 100:.1f}% of {qty:.6f})"
             )
+        else:
+            # Not filled enough within timeout: cancel order, close partial (if any), and stop
+            print(
+                f"[INFO] LIMIT entry NOT filled enough within timeout. "
+                f"filled_size={filled_size:.6f}, needed>={target_size:.6f}"
+            )
+            if entry_order_id is not None:
+                await _cancel_order(client, symbol, entry_order_id)
+
+            if filled_size > 0:
+                # Close any partial position at market for safety
+                await _close_position_market(client, symbol, direction, filled_size)
+
+            print("[INFO] Exiting without placing TP/SL/trailing.")
             return
-        effective_qty = filled_size
 
     eff_qty_str = format_qty(effective_qty)
     print(f"[INFO] Using effective_qty={eff_qty_str} for exits.")
