@@ -153,7 +153,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         "/openApi/swap/v2/trade/order",
         client["api_key"],
         client["secret_key"],
-        data=entry_payload,
+        params=entry_payload,
     )
     print(f"ENTRY RESPONSE: {entry_resp}")
 
@@ -210,7 +210,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
             "/openApi/swap/v2/trade/order",
             client["api_key"],
             client["secret_key"],
-            data=tp_payload,
+            params=tp_payload,
         )
         print(f"TP{i} RESPONSE: {tp_resp}")
 
@@ -244,7 +244,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
                 "/openApi/swap/v2/trade/order",
                 client["api_key"],
                 client["secret_key"],
-                data=trail_payload,
+                params=trail_payload,
             )
             print(f"TRAILING STOP RESPONSE: {trail_resp}")
         else:
@@ -269,7 +269,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         "/openApi/swap/v2/trade/order",
         client["api_key"],
         client["secret_key"],
-        data=sl_payload,
+        params=sl_payload,
     )
     print(f"STOP LOSS RESPONSE: {sl_resp}")
 
