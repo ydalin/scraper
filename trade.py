@@ -1,5 +1,7 @@
-# trade.py – LIMIT entry + separate TP/SL/trailing, with symbol mapping and leverage clamp
-from typing import Optional
+# trade.py – LIMIT/MARKET entry + separate TP/SL/trailing, symbol mapping, leverage clamp
+# Python 3.8 compatible
+
+import asyncio
 
 from api import bingx_api_request
 from config import get_config
@@ -43,20 +45,120 @@ def map_symbol(signal_symbol):
     # 'BTC/USDT' -> 'BTC-USDT'
     if "/" in s:
         base, quote = s.split("/", 1)
-        return f"{base}-{quote}"
+        return "%s-%s" % (base, quote)
 
     # 'BTCUSDT' -> 'BTC-USDT'
     if s.endswith("USDT"):
         base = s[:-4]
-        return f"{base}-USDT"
+        return "%s-USDT" % base
 
     # Fallback: return as-is
     return s
 
 
-def format_qty(qty: float) -> str:
+def format_qty(qty):
     """Format quantity with up to 6 decimals, strip trailing zeros."""
     return ("%.6f" % qty).rstrip("0").rstrip(".")
+
+
+# ---------------------------------------------------------------------------
+# Helpers: leverage + fill polling
+# ---------------------------------------------------------------------------
+
+async def set_symbol_leverage(client, symbol, leverage, dry_run=False):
+    """
+    Set opening leverage for a symbol via BingX API.
+
+    Endpoint: /openApi/swap/v2/trade/leverage
+    Method:   POST
+    Params:
+      - symbol: e.g. 'BTC-USDT'
+      - side:   'BOTH' in One-Way mode
+      - leverage: integer (as string is fine)
+
+    This is always called before placing the entry order so the exchange
+    leverage matches what the bot uses for position sizing.
+    """
+    # Safety clamp: leverage must be at least 1
+    try:
+        lev_int = int(leverage)
+    except Exception:
+        lev_int = 1
+    if lev_int < 1:
+        lev_int = 1
+
+    if dry_run:
+        print("[LEVERAGE] (dry run) would set leverage for %s to %sx" % (symbol, lev_int))
+        return
+
+    payload = {
+        "symbol": symbol,
+        "side": "BOTH",          # One-Way mode
+        "leverage": str(lev_int),
+        "recvWindow": 5000,
+    }
+
+    print("[LEVERAGE] Setting leverage for %s to %sx with payload: %s"
+          % (symbol, lev_int, payload))
+
+    resp = await bingx_api_request(
+        "POST",
+        "/openApi/swap/v2/trade/leverage",
+        client["api_key"],
+        client["secret_key"],
+        params=payload,
+    )
+
+    print("[LEVERAGE] RESPONSE:", resp)
+
+
+async def wait_for_position_open(client, symbol, timeout_seconds=300, poll_interval=3.0):
+    """
+    Poll /openApi/swap/v2/user/positions until we see a position for `symbol`
+    (or until timeout).
+
+    We do NOT try to measure percentage fill; we simply wait until BingX
+    reports any position for that symbol. This is enough to avoid
+    'position not exist' errors when placing TP/SL/trailing.
+
+    Returns True if position found, False if timed out or on repeated errors.
+    """
+    start = asyncio.get_event_loop().time()
+    api_key = client["api_key"]
+    secret_key = client["secret_key"]
+
+    print("[WAIT] Waiting for position to appear for %s (timeout %ss)" % (symbol, timeout_seconds))
+
+    while True:
+        elapsed = asyncio.get_event_loop().time() - start
+        if elapsed > timeout_seconds:
+            print("[WAIT] Timeout waiting for position on %s." % symbol)
+            return False
+
+        try:
+            resp = await bingx_api_request(
+                "GET",
+                "/openApi/swap/v2/user/positions",
+                api_key,
+                secret_key,
+            )
+            if resp.get("code") == 0:
+                data = resp.get("data") or []
+                if isinstance(data, list):
+                    for pos in data:
+                        try:
+                            pos_sym = pos.get("symbol")
+                        except AttributeError:
+                            continue
+                        if pos_sym == symbol:
+                            print("[WAIT] Position for %s detected in /user/positions." % symbol)
+                            return True
+            else:
+                print("[WAIT] positions error for %s: %s" % (symbol, resp.get("msg")))
+        except Exception as e:
+            print("[WAIT] Exception while polling positions for %s: %s" % (symbol, e))
+
+        await asyncio.sleep(poll_interval)
 
 
 # ---------------------------------------------------------------------------
@@ -64,12 +166,12 @@ def format_qty(qty: float) -> str:
 # ---------------------------------------------------------------------------
 
 async def execute_trade(
-    client: dict,
-    signal: dict,
-    usdt_amount: float,
-    leverage: int = 10,
-    config: Optional[dict] = None,
-    dry_run: bool = False,
+    client,
+    signal,
+    usdt_amount,
+    leverage=10,
+    config=None,
+    dry_run=False,
 ):
     """
     Execute a trade on BingX based on a parsed Telegram signal.
@@ -78,7 +180,8 @@ async def execute_trade(
     - Multi-TP exits as separate TAKE_PROFIT_MARKET orders
     - Separate STOP_MARKET stop-loss
     - Optional TRAILING_STOP_MARKET on the remaining quantity
-    - No polling or fill-waiting: exits are placed immediately after entry.
+    - Fill-poll block – we wait for a position to exist before
+      placing TP/SL/trailing to avoid 'position not exist' errors.
     """
     if config is None:
         config = get_config()
@@ -87,29 +190,31 @@ async def execute_trade(
     symbol = map_symbol(raw_symbol)
     direction = str(signal.get("direction", "")).upper()  # LONG / SHORT
     entry = float(signal.get("entry", 0.0))
-    targets = [float(t) for t in signal.get("targets", [])[:4]]
+    targets_raw = signal.get("targets", [])
+    targets = [float(t) for t in targets_raw[:4]]
     stoploss = float(signal.get("stoploss", 0.0))
 
     # Basic sanity checks
     if not symbol or entry <= 0 or not direction or not targets or stoploss <= 0:
         print(
             "[ERROR] Invalid signal in execute_trade: "
-            f"raw_symbol={raw_symbol!r} mapped_symbol={symbol!r} "
-            f"direction={direction!r} entry={entry!r} targets={targets!r} stoploss={stoploss!r}"
+            "raw_symbol=%r mapped_symbol=%r direction=%r entry=%r targets=%r stoploss=%r"
+            % (raw_symbol, symbol, direction, entry, targets, stoploss)
         )
         return
 
     # -----------------------------------------------------------------------
-    # Leverage: clamp by both config and the leverage argument
+    # Leverage: clamp by signal, by argument, and by config cap
     # -----------------------------------------------------------------------
-    # Signal may contain its own leverage; if so we clamp it.
     signal_lev = signal.get("leverage")
     try:
-        signal_lev = int(signal_lev) if signal_lev is not None else leverage or 1
+        if signal_lev is None:
+            signal_lev = leverage or 1
+        else:
+            signal_lev = int(signal_lev)
     except Exception:
         signal_lev = leverage or 1 or 1
 
-    # Config cap
     max_lev_cfg = config.get("max_allowed_leverage", 10)
     try:
         max_lev_cfg = int(max_lev_cfg)
@@ -118,7 +223,6 @@ async def execute_trade(
     if max_lev_cfg < 1:
         max_lev_cfg = 1
 
-    # Effective leverage = min( what main.py asked, what signal said, config cap )
     lev_candidates = []
     for cand in (signal_lev, leverage, max_lev_cfg):
         try:
@@ -126,9 +230,12 @@ async def execute_trade(
             if c > 0:
                 lev_candidates.append(c)
         except Exception:
-            continue
+            pass
 
-    eff_leverage = max(1, min(lev_candidates)) if lev_candidates else 1
+    if lev_candidates:
+        eff_leverage = max(1, min(lev_candidates))
+    else:
+        eff_leverage = 1
 
     # -----------------------------------------------------------------------
     # Position size from USDT, leverage, entry
@@ -145,19 +252,24 @@ async def execute_trade(
         order_type = "LIMIT"
 
     print("======================================================================")
-    print(f"EXECUTING TRADE for {symbol}")
-    print(f"  Direction:   {direction}")
-    print(f"  Order type:  {order_type}")
-    print(f"  Entry:       {entry}")
-    print(f"  Qty (intended): {qty_str} (≈ {usdt_amount:.4f} USDT at {eff_leverage}x)")
-    print(f"  Targets:     {targets}")
-    print(f"  Stoploss:    {stoploss}")
+    print("EXECUTING TRADE for %s" % symbol)
+    print("  Direction:   %s" % direction)
+    print("  Order type:  %s" % order_type)
+    print("  Entry:       %s" % entry)
+    print("  Qty (intended): %s (≈ %.4f USDT at %dx)" % (qty_str, usdt_amount, eff_leverage))
+    print("  Targets:     %s" % targets)
+    print("  Stoploss:    %s" % stoploss)
     print("======================================================================")
+
+    # -----------------------------------------------------------------------
+    # ALWAYS TRY TO SET LEVERAGE (real API call)
+    # -----------------------------------------------------------------------
+    await set_symbol_leverage(client, symbol, eff_leverage, dry_run=dry_run)
 
     # -----------------------------------------------------------------------
     # ENTRY ORDER
     # -----------------------------------------------------------------------
-    entry_payload: dict[str, str] = {
+    entry_payload = {
         "symbol": symbol,
         "side": side,
         "positionSide": "BOTH",   # One-Way mode
@@ -190,10 +302,23 @@ async def execute_trade(
         print("[ENTRY ERROR]", entry_resp.get("msg"))
         return
 
-    # We will base TP/SL quantities on intended qty (simple, no polling).
+    # -----------------------------------------------------------------------
+    # FILL POLLING: wait until BingX reports a position for this symbol
+    # -----------------------------------------------------------------------
+    filled = await wait_for_position_open(
+        client,
+        symbol,
+        timeout_seconds=300,      # adjust if you want longer
+        poll_interval=3.0,
+    )
+    if not filled:
+        print("[INFO] Position for %s never appeared. Skipping TP/SL/trailing." % symbol)
+        return
+
+    # We will base TP/SL quantities on intended qty (simple).
     effective_qty = qty
     eff_qty_str = format_qty(effective_qty)
-    print(f"[INFO] Using effective_qty={eff_qty_str} for exits.")
+    print("[INFO] Using effective_qty=%s for exits." % eff_qty_str)
 
     # -----------------------------------------------------------------------
     # TAKE PROFITS (separate TAKE_PROFIT_MARKET orders)
@@ -221,7 +346,7 @@ async def execute_trade(
             "workingType": "MARK_PRICE",
         }
 
-        print(f"TP{i} ORDER:", tp_payload)
+        print("TP%d ORDER:" % i, tp_payload)
 
         tp_resp = await bingx_api_request(
             "POST",
@@ -230,7 +355,7 @@ async def execute_trade(
             client["secret_key"],
             params=tp_payload,
         )
-        print(f"TP{i} RESPONSE:", tp_resp)
+        print("TP%d RESPONSE:" % i, tp_resp)
 
     # -----------------------------------------------------------------------
     # TRAILING STOP MARKET on remaining size (optional)
@@ -299,5 +424,6 @@ async def execute_trade(
     print("STOP LOSS RESPONSE:", sl_resp)
 
     print(
-        f"REAL TRADE EXECUTED: {symbol} {direction} {eff_leverage}x – ${usdt_amount:.2f} (order_type={order_type})"
+        "REAL TRADE EXECUTED: %s %s %dx – $%.2f (order_type=%s)"
+        % (symbol, direction, eff_leverage, usdt_amount, order_type)
     )
