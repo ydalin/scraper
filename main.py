@@ -1,163 +1,73 @@
-# main.py – BINGX ×10 FUTURES BOT
-# - Normal mode: 5.8% of balance, max 10x leverage
-# - Tiny test: $1–$9 and max 2x leverage
-# - Live Telegram (Telethon) OR file-based (telegram_messages.txt)
-# - Stop-loss clamp: max stop_loss_percent away from entry
+# main.py – SIMPLE LIVE/FILE BOT USING CONFIG.PY ONLY
 
 import asyncio
 import hashlib
-import getpass
-import re
-from trade import execute_trade
+from datetime import datetime
+
 from api import bingx_api_request
 from bot_telegram import parse_signal, init_telegram, read_credentials
 import bot_telegram
-from config import get_config
+from telethon.tl.types import InputPeerChannel
+from config import get_config, prompt_config
+from trade import execute_trade
 
 
-print("\n" + "=" * 70)
-print("   BINGX ×10 FUTURES BOT – LIVE MONEY")
-print("=" * 70)
-
-api_key = getpass.getpass("   Enter BingX API Key      : ").strip()
-secret_key = getpass.getpass("   Enter BingX Secret Key   : ").strip()
-
-# Tiny test vs normal sizing
-test = input("   Tiny test mode ($1–$9 + 1–2x) or Normal mode? (t/n) [n]: ").strip().lower() == "t"
-print("   → TINY TEST MODE – $1–$9 + 1–2x leverage"
-      if test else "   → NORMAL MODE – 5.8% + config leverage cap")
-
-use_live = False
-if not test:
-    # Only ask for live Telegram in normal mode
-    live_choice = input("   Use LIVE Telegram scraping or local file? (live/file) [file]: ").strip().lower()
-    use_live = (live_choice == "live")
-
-print("=" * 70 + "\n")
-
-client_bingx = {
-    "api_key": api_key,
-    "secret_key": secret_key,
-    "base_url": "https://open-api.bingx.com",
-}
-
-config = get_config()
-
-if config.get("dry_run_mode", False):
-    print("⚠ DRY-RUN MODE ENABLED IN CONFIG – no real orders will be sent.\n")
-
-print(
-    f"[CONFIG] usdt_per_trade_percent={config['usdt_per_trade_percent']}%, "
-    f"max_open_positions={config['max_open_positions']}, "
-    f"max_trades_per_day={config['max_trades_per_day']}, "
-    f"max_leverage={config['max_leverage']}, "
-    f"stop_loss_percent={config['stop_loss_percent']}%, "
-    f"trailing_activate_after_tp={config['trailing_activate_after_tp']}, "
-    f"trailing_callback_rate={config['trailing_callback_rate']}%"
-)
-
-
-# ------------------------------------------------
-# Helpers: BingX
-# ------------------------------------------------
-
-async def get_balance() -> float:
-    """
-    Fetch futures balance from BingX.
-
-    We reuse the same endpoint pattern you've been using:
-    /openApi/swap/v2/user/balance
-    """
+async def get_open_positions_count(client_bingx: dict) -> int:
     try:
         resp = await bingx_api_request(
             "GET",
-            "/openApi/swap/v2/user/balance",
+            "/openApi/swap/v2/user/positions",
             client_bingx["api_key"],
             client_bingx["secret_key"],
         )
+        if resp.get("code") == 0:
+            data = resp.get("data") or []
+            if isinstance(data, list):
+                return len(data)
+            if isinstance(data, dict) and data:
+                return 1
     except Exception as e:
-        print(f"[BALANCE ERROR] {e}")
-        return 6000.0
-
-    if resp.get("code") != 0:
-        return 6000.0
-
-    data = resp.get("data") or {}
-    # Handle list or dict shapes
-    if isinstance(data, list) and data:
-        bal_info = data[0].get("balance", data[0])
-    elif isinstance(data, dict):
-        bal_info = data.get("balance", data)
-    else:
-        return 6000.0
-
-    for key in ("availableMargin", "availableBalance", "equity", "balance"):
-        val = bal_info.get(key)
-        if val is not None:
-            try:
-                return float(val)
-            except Exception:
-                continue
-
-    return 6000.0
-
-
-async def get_open_positions_count() -> int:
-    """
-    Count open futures positions.
-
-    Reuses the trade/position-style endpoint you've been using.
-    """
-    try:
-        resp = await bingx_api_request(
-            "GET",
-            "/openApi/swap/v2/trade/position",
-            client_bingx["api_key"],
-            client_bingx["secret_key"],
-        )
-    except Exception as e:
-        print(f"[POSITION ERROR] {e}")
-        return 0
-
-    if resp.get("code") != 0:
-        return 0
-
-    data = resp.get("data") or []
-    if isinstance(data, list):
-        return len(data)
-    if isinstance(data, dict) and data:
-        return 1
+        print(f"[POS COUNT ERROR] {e}")
     return 0
 
 
-# ------------------------------------------------
-# Helpers: Telegram
-# ------------------------------------------------
+def load_config_interactive():
+    print("\n" + "=" * 70)
+    print("TRADING BOT – CONFIGURATION")
+    print("=" * 70)
+    choice = input("Load config from file (config.py) or configure now? (load/configure) [load]: ").strip().lower()
+    if choice == "configure":
+        cfg = prompt_config()
+        print("\nUsing interactive configuration:")
+    else:
+        cfg = get_config()
+        print("\nLoaded configuration from config.py:")
+    print(f"  USDT per trade       : {cfg['usdt_per_trade']}")
+    print(f"  Max trades per day   : {cfg['max_trades_per_day']}")
+    print(f"  Check interval       : {cfg['check_interval_seconds']}s")
+    print(f"  Position mode        : {cfg['position_mode']}")
+    print(f"  Order type           : {cfg['order_type']}")
+    print(f"  Max allowed leverage : {cfg['max_allowed_leverage']}x")
+    print(f"  Dry run mode         : {cfg['dry_run_mode']}")
+    return cfg
 
-async def fetch_live_signals(limit=10, n_signals=1, last_message_id=None):
+
+async def fetch_new_signals_live(last_message_id=None, limit=30):
     """
-    Fetch latest PREMIUM SIGNAL(s) from Telegram channel using Telethon.
+    Fetch new PREMIUM SIGNAL messages from Telegram using Telethon.
 
-    Expects:
-    - credentials.txt with api_id, api_hash, bingx_api_key (handled in init)
-    - channel_details.txt:
-          channel_id: <id>
-          access_hash: <hash>
+    Expects channel_details.txt to contain:
+      channel_id: <id>
+      access_hash: <hash>
     """
-    from telethon.tl.types import InputPeerChannel
-
     try:
         if bot_telegram.client is None:
             print("[FETCH ERROR] Telegram client not initialized.")
             return [], last_message_id
 
         if not bot_telegram.client.is_connected():
-            print("[FETCH ERROR] Telegram client not connected. Attempting reconnect...")
-            try:
-                await bot_telegram.client.connect()
-            except Exception as e:
-                print(f"[FETCH ERROR] Reconnect failed: {e}")
-                return [], last_message_id
+            print("[FETCH] Telegram client not connected; reconnecting...")
+            await bot_telegram.client.connect()
 
         with open("channel_details.txt") as f:
             lines = f.readlines()
@@ -170,12 +80,14 @@ async def fetch_live_signals(limit=10, n_signals=1, last_message_id=None):
         signals = []
         new_last_id = last_message_id
 
-        for msg in messages:
+        # Process from oldest to newest so we trade in order
+        for msg in reversed(messages):
             if not msg.message:
                 continue
             text = msg.message
             if "PREMIUM SIGNAL" not in text:
                 continue
+
             if last_message_id is not None and msg.id <= last_message_id:
                 continue
 
@@ -185,218 +97,260 @@ async def fetch_live_signals(limit=10, n_signals=1, last_message_id=None):
                 if new_last_id is None or msg.id > new_last_id:
                     new_last_id = msg.id
 
-        return (signals[-n_signals:] if signals else []), new_last_id
-
+        return signals, new_last_id
     except Exception as e:
-        print(f"[LIVE TELEGRAM ERROR] {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[FETCH ERROR] {e}")
         return [], last_message_id
 
 
-def fetch_signals_from_file(n_signals=1):
-    """
-    Read last X signals from telegram_messages.txt.
-
-    Expected format:
-    - One full Telegram message per block.
-    - Blocks separated by one blank line.
-    - Each signal block contains 'PREMIUM SIGNAL' and matches parse_signal().
-    """
+def read_signals_from_file(path="telegram_messages.txt", max_signals=None):
     try:
-        with open("telegram_messages.txt", "r", encoding="utf-8") as f:
-            content = f.read().strip()
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
     except FileNotFoundError:
-        print("telegram_messages.txt not found.")
+        print(f"[FILE] {path} not found.")
         return []
 
-    blocks = re.split(r"\n\s*\n", content)
+    # Very simple: split on blank lines and only keep blocks with PREMIUM SIGNAL
+    blocks = content.split("\n\n")
     signals = []
-
     for block in blocks:
-        if "PREMIUM SIGNAL" not in block:
+        text = block.strip()
+        if not text:
             continue
-        sig = parse_signal(block)
+        if "PREMIUM SIGNAL" not in text:
+            continue
+        sig = parse_signal(text)
         if sig:
             signals.append(sig)
-
-    if not signals:
-        print("No valid signals found in telegram_messages.txt.")
-        return []
-
-    return signals[-n_signals:]
+    if max_signals is not None:
+        return signals[-max_signals:]
+    return signals
 
 
-# ------------------------------------------------
-# Stop-loss clamp
-# ------------------------------------------------
+async def main():
+    print("\n" + "=" * 70)
+    print("   BINGX ×10 FUTURES BOT – LIVE MONEY")
+    print("=" * 70)
 
-def clamp_stoploss(signal, stop_loss_percent):
-    """
-    Clamp signal['stoploss'] so it is at most stop_loss_percent away from signal['entry'].
+    config = load_config_interactive()
 
-    - If the signal SL is tighter (closer to entry), we keep it.
-    - If it is wider (too far), we clamp to the allowed band.
-
-    LONG:
-      allowed_min = entry * (1 - pct)
-      if sl < allowed_min -> clamp up to allowed_min
-
-    SHORT:
-      allowed_max = entry * (1 + pct)
-      if sl > allowed_max -> clamp down to allowed_max
-    """
-    try:
-        direction = str(signal.get("direction", "")).upper()
-        entry = float(signal["entry"])
-        sl = float(signal["stoploss"])
-    except Exception:
-        # If anything is missing or malformed, don't clamp.
-        return
-
-    pct = float(stop_loss_percent) / 100.0
-    if pct <= 0:
-        return
-
-    if direction == "LONG":
-        allowed_sl = entry * (1.0 - pct)
-        if sl < allowed_sl:
-            print(f"[SL CLAMP] LONG SL {sl:.6f} too far from entry {entry:.6f}, "
-                  f"clamping to {allowed_sl:.6f}")
-            signal["stoploss"] = allowed_sl
-    elif direction == "SHORT":
-        allowed_sl = entry * (1.0 + pct)
-        if sl > allowed_sl:
-            print(f"[SL CLAMP] SHORT SL {sl:.6f} too far from entry {entry:.6f}, "
-                  f"clamping to {allowed_sl:.6f}")
-            signal["stoploss"] = allowed_sl
+    # === MODE: tiny test or normal ===
+    tiny_choice = input("Tiny test mode ($1–$9 + 1–2x) or Normal mode? (t/n) [n]: ").strip().lower()
+    tiny_mode = (tiny_choice == "t")
+    if tiny_mode:
+        print("   → TINY TEST MODE – $1–$9 + up to 2x leverage")
     else:
-        # Unknown direction – don't touch
-        return
+        print("   → NORMAL MODE – config USDT per trade + config leverage cap")
+    print("=" * 70)
 
+    # === DRY RUN / LIVE ===
+    if config["dry_run_mode"]:
+        dry_run = True
+        print("\n⚠️  DRY-RUN MODE ENABLED IN CONFIG – no real trades will be sent.")
+    else:
+        live_choice = input("Run LIVE or DRY-RUN? (live/dry) [live]: ").strip().lower()
+        dry_run = (live_choice != "live")
 
-# ------------------------------------------------
-# Main loop
-# ------------------------------------------------
+    mode_name = "LIVE" if not dry_run else "DRY-RUN"
+    print(f"RUNNING IN {mode_name} MODE")
 
-async def main_loop():
-    print("×10 BOT STARTED – Waiting for new signals...\n")
-    traded_hashes = set()
-    trade_count = 0
-    max_trades = int(config.get("max_trades_per_day", 20))
-    max_open_pos = int(config.get("max_open_positions", 14))
-    max_lev = int(config.get("max_leverage", 10))
-    dry_run = bool(config.get("dry_run_mode", False))
-    stop_loss_pct = float(config.get("stop_loss_percent", 1.8))
+    # === SIGNAL SOURCE: LIVE TELEGRAM OR FILE ===
+    src_choice = input("Use LIVE Telegram scraping or local file? (live/file) [file]: ").strip().lower()
+    use_live = (src_choice == "live")
 
-    last_message_id = None
-
-    # Optional: set up live Telegram (only if requested and not in test mode)
+    # === TELEGRAM INITIALIZATION (for LIVE signal fetching) ===
     if use_live:
+        print("\n=== TELEGRAM CONNECTION ===")
         creds = read_credentials("credentials.txt")
         if "api_id" not in creds or "api_hash" not in creds:
-            print("Missing api_id/api_hash in credentials.txt – cannot use LIVE Telegram.")
-        else:
-            init_telegram(int(creds["api_id"]), creds["api_hash"])
-            try:
-                if bot_telegram.client is not None and not bot_telegram.client.is_connected():
-                    print("Connecting to Telegram...")
-                    await bot_telegram.client.start()
-                    print("Telegram connected.")
-            except Exception as e:
-                print(f"[TELEGRAM START ERROR] {e}")
-                import traceback
-                traceback.print_exc()
+            print("Missing Telegram credentials (api_id/api_hash) in credentials.txt")
+            return
 
-    while True:
+        init_telegram(int(creds["api_id"]), creds["api_hash"])
+
+        phone = input("Enter Phone Number (with +): ").strip()
+        if not phone:
+            print("Phone number is required for Telegram connection!")
+            return
+
         try:
-            if trade_count >= max_trades:
-                print(f"Max trades reached ({max_trades}). Stopping for now.")
-                break
+            await bot_telegram.client.connect()
+            if not await bot_telegram.client.is_user_authorized():
+                await bot_telegram.client.send_code_request(phone)
+                code = input("Enter the code you received on Telegram: ").strip()
+                await bot_telegram.client.sign_in(phone, code)
+            print("Telegram connected.")
+        except Exception as e:
+            print(f"Telegram login failed: {e}")
+            return
+    else:
+        creds = {}
 
-            balance = await get_balance()
+    # === BINGX CLIENT SETUP ===
+    if dry_run:
+        client_bingx = {
+            "api_key": "dummy",
+            "secret_key": "dummy",
+            "base_url": "https://test.com",
+        }
+    else:
+        print("\n=== BINGX – SECRET KEY REQUIRED ===")
+        secret_key = input("Enter BingX Secret Key: ").strip()
+        api_key = config.get("bingx_api_key", "").strip()
 
-            # Decide trade size
-            if config.get("use_absolute_usdt", False):
-                usdt_amount = float(config.get("absolute_usdt_per_trade", 5.0))
+        if not secret_key or not api_key:
+            print("BingX Secret Key AND bingx_api_key in config.py are required for LIVE mode!")
+            return
+
+        client_bingx = {
+            "api_key": api_key,
+            "secret_key": secret_key,
+            "base_url": "https://open-api.bingx.com",
+        }
+
+    # === MAIN LOOP (LIVE) or ONE-SHOT (FILE) ===
+    traded_hashes = set()
+    daily_trades = 0
+    last_reset = datetime.now().date()
+    last_message_id = None
+
+    if not use_live:
+        # FILE MODE: run once over the file
+        signals = read_signals_from_file("telegram_messages.txt")
+        if not signals:
+            print("No valid signals found in telegram_messages.txt.")
+            return
+
+        print(f"Found {len(signals)} signal(s) in file.")
+        for idx, sig in enumerate(signals, start=1):
+            h = hashlib.md5(sig["raw_text"].encode("utf-8")).hexdigest()
+            if h in traded_hashes:
+                continue
+
+            # Determine USDT per trade
+            if tiny_mode:
+                usdt_amount = min(9.0, max(1.0, config["usdt_per_trade"]))
             else:
-                usdt_amount = balance * (config["usdt_per_trade_percent"] / 100.0)
+                usdt_amount = config["usdt_per_trade"]
 
-            if test:
-                usdt_amount = max(1.0, min(9.0, usdt_amount))
+            # Clamp leverage
+            sig_lev = sig.get("leverage") or 1
+            try:
+                sig_lev = int(sig_lev)
+            except Exception:
+                sig_lev = 1
 
-            if usdt_amount <= 0:
-                print("Computed trade size <= 0, skipping loop...")
-                await asyncio.sleep(config["check_interval_seconds"])
-                continue
+            max_lev = config.get("max_allowed_leverage", 10)
+            try:
+                max_lev = int(max_lev)
+            except Exception:
+                max_lev = 10
 
-            open_pos = await get_open_positions_count()
-            if open_pos >= max_open_pos:
-                print(
-                    f"Max open positions reached "
-                    f"({open_pos}/{max_open_pos}) – waiting..."
-                )
-                await asyncio.sleep(config["check_interval_seconds"])
-                continue
-
-            # ---- FETCH SIGNAL ----
-            if use_live and not test:
-                # LIVE Telegram
-                signals, last_message_id = await fetch_live_signals(
-                    limit=10, n_signals=3, last_message_id=last_message_id
-                )
+            if tiny_mode:
+                lev_cap = min(2, max_lev)
             else:
-                # File-based (test or normal)
-                signals = fetch_signals_from_file(n_signals=3)
+                lev_cap = max_lev
+            lev = max(1, min(sig_lev, lev_cap))
 
-            new_signal = None
-            for sig in signals:
-                h = hashlib.md5(sig["raw_text"].encode()).hexdigest()
-                if h not in traded_hashes:
-                    new_signal = (sig, h)
-                    break
-
-            if not new_signal:
-                await asyncio.sleep(config["check_interval_seconds"])
-                continue
-
-            signal, h = new_signal
-
-            # ---- LEVERAGE CAP ----
-            signal_lev = int(signal.get("leverage", max_lev))
-            lev_cap = 2 if test else max_lev
-            lev = min(signal_lev, lev_cap)
-
-            # ---- SL CLAMP ----
-            clamp_stoploss(signal, stop_loss_pct)
-
-            print(
-                f"NEW SIGNAL → {signal['symbol']} {signal['direction']} "
-                f"{lev}x – ${usdt_amount:.2f}"
-            )
-
+            print(f"FILE SIGNAL {idx}: {sig['symbol']} {sig['direction']} {lev}x – ${usdt_amount:.2f}")
             await execute_trade(
                 client_bingx,
-                signal,
+                sig,
                 usdt_amount,
                 leverage=lev,
                 config=config,
                 dry_run=dry_run,
             )
-
             traded_hashes.add(h)
-            trade_count += 1
-            print(f"Trade executed – unique this run: {len(traded_hashes)} "
-                  f"(total trades: {trade_count})\n")
+        print("FILE MODE COMPLETE.")
+        return
+
+    # LIVE MODE LOOP
+    print("\nLIVE MODE STARTED – waiting for new signals...")
+    while True:
+        try:
+            # Daily reset of counter
+            today = datetime.now().date()
+            if today != last_reset:
+                daily_trades = 0
+                last_reset = today
+                traded_hashes.clear()
+                print(f"=== Daily reset – {today} ===")
+
+            if daily_trades >= config["max_trades_per_day"]:
+                print(f"Max trades reached ({config['max_trades_per_day']}). Sleeping 1 hour...")
+                await asyncio.sleep(3600)
+                continue
+
+            open_count = await get_open_positions_count(client_bingx)
+            if open_count >= config["max_open_positions"]:
+                print(f"[LIMIT] Open positions {open_count} ≥ max_open_positions {config['max_open_positions']}.")
+                await asyncio.sleep(config["check_interval_seconds"])
+                continue
+
+            signals, last_message_id = await fetch_new_signals_live(
+                last_message_id=last_message_id, limit=30
+            )
+            if not signals:
+                await asyncio.sleep(config["check_interval_seconds"])
+                continue
+
+            # Trade only the first NEW signal this loop
+            sig = signals[0]
+            h = hashlib.md5(sig["raw_text"].encode("utf-8")).hexdigest()
+            if h in traded_hashes:
+                await asyncio.sleep(config["check_interval_seconds"])
+                continue
+
+            # Determine USDT per trade
+            if tiny_mode:
+                usdt_amount = min(9.0, max(1.0, config["usdt_per_trade"]))
+            else:
+                usdt_amount = config["usdt_per_trade"]
+
+            # Clamp leverage
+            sig_lev = sig.get("leverage") or 1
+            try:
+                sig_lev = int(sig_lev)
+            except Exception:
+                sig_lev = 1
+
+            max_lev = config.get("max_allowed_leverage", 10)
+            try:
+                max_lev = int(max_lev)
+            except Exception:
+                max_lev = 10
+
+            if tiny_mode:
+                lev_cap = min(2, max_lev)
+            else:
+                lev_cap = max_lev
+            lev = max(1, min(sig_lev, lev_cap))
+
+            print(f"NEW SIGNAL → {sig['symbol']} {sig['direction']} {lev}x – ${usdt_amount:.2f}")
+            await execute_trade(
+                client_bingx,
+                sig,
+                usdt_amount,
+                leverage=lev,
+                config=config,
+                dry_run=dry_run,
+            )
+            traded_hashes.add(h)
+            daily_trades += 1
+            print(f"Trade executed – unique this run: {len(traded_hashes)} (total today: {daily_trades})")
 
             await asyncio.sleep(config["check_interval_seconds"])
-
         except Exception as e:
-            print(f"[ERROR] {e}\n")
-            import traceback
-            traceback.print_exc()
+            print(f"[ERROR] {e}")
             await asyncio.sleep(30)
 
 
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nBot stopped by user")
+    except Exception as e:
+        print(f"Fatal error: {e}")
