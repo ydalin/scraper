@@ -8,6 +8,9 @@ import asyncio
 import hashlib
 import getpass
 import re
+
+from telethon.tl.types import InputPeerChannel
+
 from trade import execute_trade
 from api import bingx_api_request
 from bot_telegram import parse_signal, init_telegram, read_credentials
@@ -135,64 +138,70 @@ async def get_open_positions_count() -> int:
 # ------------------------------------------------
 
 async def fetch_live_signals(limit=10, n_signals=1, last_message_id=None):
-    """
-    Fetch latest PREMIUM SIGNAL(s) from Telegram channel using Telethon.
+    """Fetch latest PREMIUM SIGNALS from Telegram channel.
 
-    Expects:
-    - credentials.txt with api_id, api_hash, bingx_api_key (handled in init)
-    - channel_details.txt:
-          channel_id: <id>
-          access_hash: <hash>
+    Behaviour:
+      - On first call (last_message_id is None): we *prime* last_message_id to the newest
+        message ID and return NO signals. This avoids trading on old backlog.
+      - On subsequent calls: only messages with msg.id > last_message_id are considered new.
     """
-    from telethon.tl.types import InputPeerChannel
-
     try:
+        # Check if Telegram client is initialized
         if bot_telegram.client is None:
-            print("[FETCH ERROR] Telegram client not initialized.")
+            print("[FETCH ERROR] Telegram client not initialized. Please restart the bot.")
             return [], last_message_id
 
+        # Check if client is connected
         if not bot_telegram.client.is_connected():
-            print("[FETCH ERROR] Telegram client not connected. Attempting reconnect...")
+            print("[FETCH ERROR] Telegram client not connected. Attempting to reconnect...")
             try:
                 await bot_telegram.client.connect()
             except Exception as e:
-                print(f"[FETCH ERROR] Reconnect failed: {e}")
+                print(f"[FETCH ERROR] Failed to reconnect: {e}")
                 return [], last_message_id
 
-        with open("channel_details.txt") as f:
+        # Load channel details
+        with open('channel_details.txt') as f:
             lines = f.readlines()
-            channel_id = int(lines[0].split(":")[1].strip())
-            access_hash = int(lines[1].split(":")[1].strip())
+            channel_id = int(lines[0].split(':')[1].strip())
+            access_hash = int(lines[1].split(':')[1].strip())
 
         entity = InputPeerChannel(channel_id, access_hash)
         messages = await bot_telegram.client.get_messages(entity, limit=limit)
 
+        # --- FIRST RUN: prime last_message_id and ignore old signals ---
+        if last_message_id is None:
+            if messages:
+                newest_id = max(m.id for m in messages if m is not None)
+                print(f"[LIVE INIT] Priming last_message_id to {newest_id}, ignoring existing signals.")
+                return [], newest_id
+            else:
+                return [], None
+
+        # --- NORMAL RUN: only process messages newer than last_message_id ---
         signals = []
         new_last_id = last_message_id
 
         for msg in messages:
-            if not msg.message:
-                continue
-            text = msg.message
-            if "PREMIUM SIGNAL" not in text:
-                continue
-            if last_message_id is not None and msg.id <= last_message_id:
+            if not msg or not msg.message:
                 continue
 
-            sig = parse_signal(text)
-            if sig:
-                signals.append(sig)
-                if new_last_id is None or msg.id > new_last_id:
-                    new_last_id = msg.id
+            if "PREMIUM SIGNAL" in msg.message and msg.id > last_message_id:
+                signal = parse_signal(msg.message)
+                if signal:
+                    signals.append(signal)
+                    if msg.id > new_last_id:
+                        new_last_id = msg.id
 
-        return (signals[-n_signals:] if signals else []), new_last_id
+        # Return at most n_signals newest signals
+        result_signals = signals[-n_signals:] if signals else []
+        return result_signals, new_last_id
 
     except Exception as e:
-        print(f"[LIVE TELEGRAM ERROR] {e}")
+        print(f"[FETCH ERROR] {e}")
         import traceback
         traceback.print_exc()
         return [], last_message_id
-
 
 def fetch_signals_from_file(n_signals=1):
     """
