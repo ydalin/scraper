@@ -1,6 +1,6 @@
-# trade.py – LIMIT entry with timeout + TP LIMIT + SL + trailing-on-TP
 import asyncio
 import time
+import math
 from api import bingx_api_request
 
 
@@ -298,7 +298,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
 
     effective_qty = qty
 
-    # If LIMIT and already FILLED in response, trust executedQty and skip waiting
+    # === KEY FIX: if LIMIT and already FILLED, trust executedQty and SKIP waiting ===
     if order_type == "LIMIT" and status == "FILLED":
         try:
             if executed is not None:
@@ -306,7 +306,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
                 if executed_f > 0:
                     effective_qty = executed_f
                     print(
-                        f"[INFO] LIMIT entry FILLED immediately, "
+                        "[INFO] LIMIT entry FILLED immediately, "
                         f"using executedQty={executed_f:.6f} and placing TP/SL/trailing."
                     )
         except Exception:
@@ -398,8 +398,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     callback_rate = float(config.get("trailing_callback_rate", 0.0)) / 100.0
 
     if 1 <= trail_tp_idx <= len(targets) and callback_rate > 0:
-        # NEW: trailing uses the FULL effective position size
-        trail_qty = effective_qty
+        trail_qty = effective_qty          # full position
         trail_qty_str = format_qty(trail_qty)
         activation_price = targets[trail_tp_idx - 1]
 
@@ -408,7 +407,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
             "side": opposite,
             "positionSide": "BOTH",
             "type": "TRAILING_STOP_MARKET",
-            "quantity": trail_qty_str,         # <-- sell entire position
+            "quantity": trail_qty_str,
             "activationPrice": str(activation_price),
             "callbackRate": str(callback_rate),
             "workingType": "MARK_PRICE",
