@@ -6,8 +6,8 @@ import asyncio
 import os
 
 # === CONFIGURATION ===
-API_ID = 12345678          # ← CHANGE TO YOUR TELEGRAM API_ID
-API_HASH = "your_api_hash_here"   # ← CHANGE TO YOUR API_HASH
+API_ID = 21062841          # ← CHANGE TO YOUR TELEGRAM API_ID
+API_HASH = "b6c864645d31a8c5fd128de70d5e2f64"   # ← CHANGE TO YOUR API_HASH
 PRIVATE_CHANNEL_ID = -1001682398986   # ← Your private channel ID (keep the -100 prefix)
 
 # Optional: Store session in file to avoid re-login every time
