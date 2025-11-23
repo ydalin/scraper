@@ -1,46 +1,53 @@
-# bot_telegram.py – FINAL
-from telethon import TelegramClient
+# bot_telegram.py – LIVE REAL-TIME SIGNAL LISTENER (Telethon + Event Handler)
+from telethon import TelegramClient, events
+import hashlib
 import re
+import asyncio
+import os
 
+# === CONFIGURATION ===
+API_ID = 12345678          # ← CHANGE TO YOUR TELEGRAM API_ID
+API_HASH = "your_api_hash_here"   # ← CHANGE TO YOUR API_HASH
+PRIVATE_CHANNEL_ID = -1001682398986   # ← Your private channel ID (keep the -100 prefix)
+
+# Optional: Store session in file to avoid re-login every time
+SESSION_NAME = "bingx_bot_session"
+
+# Global queue to send signals to main.py
+signal_queue = asyncio.Queue()
+
+# Initialize client globally
 client = None
 
-def init_telegram(api_id, api_hash):
+
+def init_telegram():
+    """Call this once at bot startup"""
     global client
-    client = TelegramClient('session', api_id, api_hash)
+    if client is not None:
+        return client
 
-def read_credentials(credentials_file='credentials.txt'):
-    creds = {}
-    try:
-        with open(credentials_file) as f:
-            for line in f:
-                if ':' in line:
-                    k, v = line.strip().split(':', 1)
-                    creds[k.strip()] = v.strip()
-    except Exception as e:
-        print(f"Error reading credentials: {e}")
-    return creds
+    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    return client
 
-def parse_signal(text):
+
+def parse_signal(text: str):
+    """Same parser as before — rock solid"""
     if not text or "PREMIUM SIGNAL" not in text.upper():
         return None
 
     try:
-        # Direction
-        direction = "LONG" if "LONG" in text.upper() or "BUY" in text.upper() else "SHORT"
+        direction = "LONG" if any(x in text.upper() for x in ["LONG", "BUY"]) else "SHORT"
 
-        # Symbol - handles both 🟢 SYMBOL/USDT and plain SYMBOL/USDT
-        symbol_match = re.search(r'[🟢🔴]?\s*([A-Z0-9]+/USDT)', text, re.IGNORECASE)
+        symbol_match = re.search(r'[🟢🔴]?\s*([A-Z0-9]+/?USDT)', text, re.IGNORECASE)
         if not symbol_match:
             return None
-        symbol = symbol_match.group(1).upper()
+        symbol = symbol_match.group(1).upper().replace("/", "")
 
-        # Leverage - handles 20X, 50X, 75X, etc.
         lev_match = re.search(r'(\d+)X', text, re.IGNORECASE)
         if not lev_match:
             return None
         leverage = int(lev_match.group(1))
 
-        # Entry range - <0.00117-0.00118>
         entry_match = re.search(r'<([\d.]+)-([\d.]+)>', text)
         if not entry_match:
             return None
@@ -48,32 +55,21 @@ def parse_signal(text):
         entry_max = float(entry_match.group(2))
         entry = (entry_min + entry_max) / 2
 
-        # Targets - extract all [number] in order
         targets = []
         for m in re.finditer(r'\[([\d.]+)\]', text):
             targets.append(float(m.group(1)))
         if len(targets) < 4:
             return None
-        targets = targets[:4]  # Take first 4 only
+        targets = targets[:4]
 
-        # Stoploss - STOPLOSS: [0.00102] or just [0.00102]
         sl_match = re.search(r'STOPLOSS.*?([\d.]+)', text, re.IGNORECASE)
-        if not sl_match:
-            # Fallback: last [number] after targets
-            if len(targets) >= 4:
-                # Usually stoploss is the last bracketed number after targets
-                all_brackets = [float(m.group(1)) for m in re.finditer(r'\[([\d.]+)\]', text)]
-                if len(all_brackets) > 4:
-                    stoploss = all_brackets[-1]
-                else:
-                    return None
-            else:
-                return None
-        else:
+        if sl_match:
             stoploss = float(sl_match.group(1))
-
-        # OPTIONAL DEBUG (REMOVED TO PREVENT SPAM)
-        # print(f"[PARSED SUCCESS] {symbol} {direction} {leverage}x Entry ~{entry} | TP4: {targets[3]} | SL: {stoploss}")
+        else:
+            all_brackets = [float(m.group(1)) for m in re.finditer(r'\[([\d.]+)\]', text)]
+            stoploss = all_brackets[-1] if len(all_brackets) > 4 else None
+            if not stoploss:
+                return None
 
         return {
             'symbol': symbol,
@@ -88,5 +84,49 @@ def parse_signal(text):
         }
 
     except Exception as e:
-        print(f"[PARSE FAILED] {e}\nFirst 200 chars: {text[:200]}")
+        print(f"[PARSE ERROR] {e}\n{text[:200]}")
         return None
+
+
+# === EVENT LISTENER (This runs forever and feeds signals into queue) ===
+@events.register(events.NewMessage(chats=PRIVATE_CHANNEL_ID))
+async def live_signal_handler(event):
+    msg = event.message.message
+    if not msg or "PREMIUM SIGNAL" not in msg.upper():
+        return
+
+    signal = parse_signal(msg)
+    if not signal:
+        return
+
+    # Duplicate protection by hash
+    signal_hash = hashlib.md5(signal['raw_text'].encode()).hexdigest()
+
+    # Avoid duplicates in the same session
+    if hasattr(live_signal_handler, "seen_hashes"):
+        if signal_hash in live_signal_handler.seen_hashes:
+            return
+    else:
+        live_signal_handler.seen_hashes = set()
+
+    live_signal_handler.seen_hashes.add(signal_hash)
+
+    print(f"\nNEW LIVE SIGNAL → {signal['symbol']} {signal['direction']} {signal['leverage']}x")
+    await signal_queue.put((signal, signal_hash))
+
+
+async def start_telegram_listener():
+    """Start the Telegram client and begin listening"""
+    global client
+    client = init_telegram()
+
+    print("Connecting to Telegram...")
+    await client.start()
+    print(f"Logged in as {await client.get_me().then(lambda u: u.first_name)}")
+    print(f"Listening to private channel: {PRIVATE_CHANNEL_ID}")
+
+    # Register the event handler
+    client.add_event_handler(live_signal_handler)
+
+    # Keep alive
+    await client.run_until_disconnected()

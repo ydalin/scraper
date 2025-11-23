@@ -1,4 +1,4 @@
-# api.py – Simple, correct BingX REST wrapper (no file read for secret)
+# api.py – Updated for BingX Swap V2 (November 2025) – No File Read for Secret
 from __future__ import annotations
 
 import requests
@@ -21,12 +21,9 @@ def _sign_query(secret_key: str, query: str) -> str:
 def _build_query(params=None) -> str:
     if not params:
         params = {}
-    # Add mandatory params
-    params = dict(params)  # copy
+    params = dict(params)
     params.setdefault("recvWindow", 5000)
     params["timestamp"] = int(time.time() * 1000)
-
-    # Sort for stable signature
     keys = sorted(params.keys())
     return "&".join(f"{k}={params[k]}" for k in keys)
 
@@ -40,18 +37,7 @@ async def bingx_api_request(
     retries: int = 3,
     delay: float = 0.5,
 ):
-    """
-    Unified BingX API request used by main.py and trade.py.
-
-    method: "GET", "POST" or "DELETE"
-    path:   e.g. "/openApi/swap/v2/trade/order"
-    params: dict of parameters (symbol, side, quantity, ...)
-
-    All parameters (including symbol, side, etc.) go into the *query string*,
-    which is what BingX expects for signed requests.
-    """
     method = method.upper()
-
     for attempt in range(retries):
         try:
             query = _build_query(params)
@@ -68,8 +54,6 @@ async def bingx_api_request(
             elif method == "DELETE":
                 resp = requests.delete(url, headers=headers, timeout=10)
             else:
-                # For BingX, sending params only in query is usually enough.
-                # We keep body empty (or could also send the same params dict).
                 resp = requests.post(url, headers=headers, timeout=10)
 
             try:
@@ -80,9 +64,7 @@ async def bingx_api_request(
             return data
 
         except Exception as e:
-            print(
-                f"API request failed (attempt {attempt + 1}/{retries}): {e}"
-            )
+            print(f"API request failed (attempt {attempt + 1}/{retries}): {e}")
             if attempt < retries - 1:
                 await asyncio.sleep(delay)
 
