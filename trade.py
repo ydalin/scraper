@@ -1,6 +1,5 @@
 import asyncio
 import time
-import math
 from api import bingx_api_request
 
 
@@ -298,7 +297,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
 
     effective_qty = qty
 
-    # === KEY FIX: if LIMIT and already FILLED, trust executedQty and SKIP waiting ===
+    # If LIMIT and already FILLED in response, trust executedQty and skip waiting
     if order_type == "LIMIT" and status == "FILLED":
         try:
             if executed is not None:
@@ -395,21 +394,31 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
 
     # ===== TRAILING STOP (SLIDING) – sell EVERYTHING when activated =====
     trail_tp_idx = int(config.get("trailing_activate_after_tp", 0))
-    callback_rate = float(config.get("trailing_callback_rate", 0.0)) / 100.0
+    # Interpret config as "percent points", clamp to [0.1, 1.0]
+    raw_trail_rate = float(config.get("trailing_callback_rate", 0.0))
+    if raw_trail_rate <= 0:
+        trail_rate = 0.0
+    else:
+        trail_rate = max(0.1, min(raw_trail_rate, 1.0))
 
-    if 1 <= trail_tp_idx <= len(targets) and callback_rate > 0:
+    if 1 <= trail_tp_idx <= len(targets) and trail_rate > 0:
         trail_qty = effective_qty          # full position
         trail_qty_str = format_qty(trail_qty)
         activation_price = targets[trail_tp_idx - 1]
+
+        print(
+            f"[TRAILING] Using clamped priceRate={trail_rate} "
+            f"(config requested {raw_trail_rate})"
+        )
 
         trail_payload = {
             "symbol": symbol,
             "side": opposite,
             "positionSide": "BOTH",
             "type": "TRAILING_STOP_MARKET",
-            "quantity": trail_qty_str,
+            "quantity": trail_qty_str,          # close all
             "activationPrice": str(activation_price),
-            "callbackRate": str(callback_rate),
+            "priceRate": str(trail_rate),       # must be ≤ 1.0
             "workingType": "MARK_PRICE",
         }
 
@@ -426,14 +435,29 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     else:
         print("[TRAILING] Trailing stop disabled or invalid config.")
 
-    # ===== STOP LOSS =====
+    # ===== STOP LOSS with auto-widening =====
+    sl_percent = float(config.get("stop_loss_percent", 1.8))
+    raw_sl = stoploss
+
+    # First, make sure SL is on the "correct" side relative to entry
+    if direction == "LONG":
+        # SL must be below entry; if not, push it below by stop_loss_percent
+        if raw_sl >= entry:
+            raw_sl = entry * (1.0 - sl_percent / 100.0)
+    else:  # SHORT
+        # SL must be above entry; if not, push it above by stop_loss_percent
+        if raw_sl <= entry:
+            raw_sl = entry * (1.0 + sl_percent / 100.0)
+
+    sl_price = raw_sl
+
     sl_payload = {
         "symbol": symbol,
         "side": opposite,
         "positionSide": "BOTH",
         "type": "STOP_MARKET",
         "quantity": eff_qty_str,
-        "stopPrice": str(stoploss),
+        "stopPrice": str(sl_price),
         "workingType": "MARK_PRICE",
     }
 
@@ -447,6 +471,43 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         params=sl_payload,
     )
     print(f"STOP LOSS RESPONSE: {sl_resp}")
+
+    # If BingX complains about SL being on the wrong side of current price,
+    # auto-widen it once and retry with a looser level.
+    if sl_resp.get("code") != 0:
+        msg = (sl_resp.get("msg") or "").lower()
+        if "should be greater than the current price" in msg or "should be less than the current price" in msg:
+            widen_factor = 2.0  # widen by 2x the configured sl_percent
+            if direction == "LONG":
+                new_sl = entry * (1.0 - (sl_percent * widen_factor) / 100.0)
+                # ensure new_sl is further away (lower) than previous sl_price
+                if new_sl < sl_price:
+                    sl_price = new_sl
+            else:  # SHORT
+                new_sl = entry * (1.0 + (sl_percent * widen_factor) / 100.0)
+                # ensure new_sl is further away (higher) than previous sl_price
+                if new_sl > sl_price:
+                    sl_price = new_sl
+
+            retry_payload = {
+                "symbol": symbol,
+                "side": opposite,
+                "positionSide": "BOTH",
+                "type": "STOP_MARKET",
+                "quantity": eff_qty_str,
+                "stopPrice": str(sl_price),
+                "workingType": "MARK_PRICE",
+            }
+            print(f"[SL RETRY] Widening SL and retrying with: {retry_payload}")
+
+            sl_resp_retry = await bingx_api_request(
+                "POST",
+                "/openApi/swap/v2/trade/order",
+                client["api_key"],
+                client["secret_key"],
+                params=retry_payload,
+            )
+            print(f"[SL RETRY] RESPONSE: {sl_resp_retry}")
 
     print(
         f"REAL TRADE EXECUTED: {symbol} {direction} {leverage}x – "
