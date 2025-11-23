@@ -1,4 +1,4 @@
-# main.py – FINAL ×10 BOT – NO SYNTAX ERRORS, CLEAN OUTPUT
+# main.py – FINAL ×10 BOT – NO KEYERROR, CLEAN BALANCE
 import asyncio
 import hashlib
 from api import bingx_api_request
@@ -23,11 +23,23 @@ config = get_config()
 
 async def get_balance():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/user/balance', client_bingx['api_key'], client_bingx['secret_key'])
-    if resp.get('code') == 0 and resp.get('data'):
-        bal = resp['data'][0].get('balance', {}).get('availableBalance')
-        if bal is not None:
-            return float(bal)
-    return 6000.0
+    if resp.get('code') == 0:
+        data = resp.get('data')
+        if data:
+            # Handle list format
+            if isinstance(data, list) and len(data) > 0:
+                item = data[0]
+                bal = item.get('balance', {}).get('availableBalance')
+                if bal is not None:
+                    return float(bal)
+                if 'availableBalance' in item:
+                    return float(item['availableBalance'])
+            # Handle dict format
+            elif isinstance(data, dict):
+                bal = data.get('availableBalance')
+                if bal is not None:
+                    return float(bal)
+    return 6000.0  # safe fallback
 
 async def get_open_positions_count():
     resp = await bingx_api_request('GET', '/openApi/swap/v2/trade/position', client_bingx['api_key'], client_bingx['secret_key'])

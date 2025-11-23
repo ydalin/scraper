@@ -5,7 +5,8 @@ import os
 CONFIG_FILE = "bot_config.json"
 
 DEFAULT_CONFIG = {
-    "usdt_per_trade_percent": 5.8,
+    # "usdt_per_trade_percent": 5.8, # original
+    "usdt_per_trade_percent": 0.08, # for testing
     "max_open_positions": 14,
     "max_trades_per_day": 20,
     "check_interval_seconds": 8,
