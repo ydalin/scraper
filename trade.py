@@ -1,81 +1,20 @@
-# trade.py – SYMBOL MAPPING + HYBRID LIMIT FILL + TP/SL/TRAILING
-
+# trade.py – LIMIT entry with timeout + cancel + TP/SL/trailing
 import asyncio
 import time
 from api import bingx_api_request
 
 
-# -------------------------------------------------------------------
-# Symbol mapping & normalization
-# -------------------------------------------------------------------
-
-# Explicit symbol overrides if exchange naming differs from signal.
-SYMBOL_MAP = {
-    "PIUSDT": "PI-USDT",
-    "PI/USDT": "PI-USDT",
-    # Add more overrides here if needed:
-    # "1000PEPE/USDT": "KPEPE-USDT",
-}
-
-
-def map_symbol(signal_symbol):
-    """
-    Normalize a signal symbol to BingX swap format.
-
-    Examples:
-      'BTC/USDT'  -> 'BTC-USDT'
-      'BTCUSDT'   -> 'BTC-USDT'
-      ' pi /usdt' -> 'PI-USDT' (via generic logic or SYMBOL_MAP)
-    """
-    if not signal_symbol:
-        return ""
-
-    s = str(signal_symbol).upper().replace(" ", "")
-
-    # First, explicit overrides
-    if s in SYMBOL_MAP:
-        return SYMBOL_MAP[s]
-
-    # Case 1: 'BTC/USDT'
-    if "/" in s:
-        base, quote = s.split("/", 1)
-        return "%s-%s" % (base, quote)
-
-    # Case 2: 'BTCUSDT'
-    if s.endswith("USDT"):
-        base = s[:-4]
-        return "%s-USDT" % base
-
-    # Fallback: return as-is
-    return s
-
-
-def _normalize_symbol(sym):
-    """Normalize symbol for comparison (strip '-', '/', spaces)."""
-    if not sym:
-        return ""
-    return str(sym).replace("-", "").replace("/", "").replace(" ", "").upper()
-
-
-def format_qty(qty):
+def format_qty(qty: float) -> str:
     """Format quantity with up to 6 decimals, strip trailing zeros."""
-    return ("%.6f" % qty).rstrip("0").rstrip(".")
+    return f"{qty:.6f}".rstrip("0").rstrip(".")
 
 
-# -------------------------------------------------------------------
-# Position & order status helpers
-# -------------------------------------------------------------------
-
-async def _get_position_size(client, symbol):
+async def _get_position_size(client, symbol: str) -> float:
     """
     Query current position size for a symbol.
     Returns absolute size (>=0), or 0.0 if none.
-
-    Uses normalized symbol matching to handle PIXEL-USDT vs PIXELUSDT.
     """
     symbol = symbol.upper()
-    norm_symbol = _normalize_symbol(symbol)
-
     try:
         resp = await bingx_api_request(
             "GET",
@@ -85,7 +24,7 @@ async def _get_position_size(client, symbol):
             params={"symbol": symbol},
         )
     except Exception as e:
-        print("[POS] Error fetching position for %s: %s" % (symbol, e))
+        print(f"[POS] Error fetching position for {symbol}: {e}")
         return 0.0
 
     if resp.get("code") != 0:
@@ -98,11 +37,9 @@ async def _get_position_size(client, symbol):
         positions = data
 
     for pos in positions:
-        pos_sym = str(pos.get("symbol", "")).upper()
-        if _normalize_symbol(pos_sym) != norm_symbol:
+        if str(pos.get("symbol", "")).upper() != symbol:
             continue
 
-        size = 0.0
         for key in (
             "positionAmt",
             "positionAmount",
@@ -114,26 +51,18 @@ async def _get_position_size(client, symbol):
         ):
             if key in pos:
                 try:
-                    size = float(pos[key])
-                    break
+                    return abs(float(pos[key]))
                 except Exception:
                     continue
-
-        if size != 0:
-            return abs(size)
-
     return 0.0
 
 
-async def _get_order_status(client, symbol, order_id):
+async def _get_order_status(client, symbol: str, order_id: str) -> str:
     """
     Query order status for a specific order.
     Returns status string (e.g. 'NEW', 'FILLED', 'PARTIALLY_FILLED', etc.) or '' on error.
     """
     symbol = symbol.upper()
-    if not order_id:
-        return ""
-
     try:
         resp = await bingx_api_request(
             "GET",
@@ -143,7 +72,7 @@ async def _get_order_status(client, symbol, order_id):
             params={"symbol": symbol, "orderId": str(order_id)},
         )
     except Exception as e:
-        print("[ORDER] Error fetching order status for %s %s: %s" % (symbol, order_id, e))
+        print(f"[ORDER] Error fetching order status for {symbol} {order_id}: {e}")
         return ""
 
     if resp.get("code") != 0:
@@ -153,19 +82,18 @@ async def _get_order_status(client, symbol, order_id):
     if isinstance(data, list) and data:
         data = data[0]
 
-    status = str(data.get("status", "")).upper()
-    return status
+    return str(data.get("status", "")).upper()
 
 
 async def _wait_for_fill_hybrid(
     client,
-    symbol,
-    order_id,
-    intended_qty,
-    threshold,
-    timeout,
-    poll_interval=2,
-):
+    symbol: str,
+    order_id: str,
+    intended_qty: float,
+    threshold: float,
+    timeout: int,
+    poll_interval: int = 2,
+) -> float:
     """
     Hybrid wait: use BOTH order status and position size.
 
@@ -179,87 +107,68 @@ async def _wait_for_fill_hybrid(
     start = time.time()
     last_size = 0.0
     print(
-        "[WAIT] Hybrid fill check for %s: threshold=%.1f%% of %.6f, timeout=%ds"
-        % (symbol, threshold * 100.0, intended_qty, timeout)
+        f"[WAIT] Hybrid fill check for {symbol}: "
+        f"threshold={threshold*100:.1f}% of {intended_qty:.6f}, timeout={timeout}s"
     )
 
     while time.time() - start < timeout:
-        # Check order status
         status = await _get_order_status(client, symbol, order_id)
         if status:
-            print("[WAIT] Order %s status: %s" % (order_id, status))
+            print(f"[WAIT] Order {order_id} status: {status}")
 
-        # Check position size
         size = await _get_position_size(client, symbol)
         last_size = size
         if size > 0:
-            print("[WAIT] Current position size for %s: %.6f" % (symbol, size))
+            print(f"[WAIT] Current position size for {symbol}: {size:.6f}")
 
         target = intended_qty * threshold
 
-        # If position big enough, accept
         if size >= target and size > 0:
             print(
-                "[WAIT] Position >= threshold: size=%.6f, needed>=%.6f"
-                % (size, target)
+                f"[WAIT] Position >= threshold: size={size:.6f}, needed>={target:.6f}"
             )
             return size
 
-        # If order is FILLED and we see any position, accept
         if status == "FILLED" and size > 0:
             print(
-                "[WAIT] Order FILLED and position present: size=%.6f, intended=%.6f"
-                % (size, intended_qty)
+                f"[WAIT] Order FILLED and position present: "
+                f"size={size:.6f}, intended={intended_qty:.6f}"
             )
             return size
 
         await asyncio.sleep(poll_interval)
 
     print(
-        "[WAIT] Hybrid fill timeout for %s. Last position size=%.6f"
-        % (symbol, last_size)
+        f"[WAIT] Hybrid fill timeout for {symbol}. "
+        f"Last position size={last_size:.6f}"
     )
     return last_size
 
 
-async def _cancel_order(client, symbol, order_id, side, order_type, position_side="BOTH"):
+async def _cancel_order(client, symbol: str):
     """
-    Cancel open orders for a given symbol.
+    Cancel ALL open orders for a given symbol.
 
-    BingX Perpetual Futures v2 does not expose a simple
-    "cancel single order" endpoint, but it *does* provide
-    /openApi/swap/v2/trade/allOpenOrders to cancel all open
-    orders for a symbol.
-
-    For our use-case ("limit entry didn’t fill, clean it up"),
-    it's perfectly fine (and safer) to cancel all open orders
-    on that symbol.
-
-    NOTE: order_id, side, order_type, position_side are kept
-    in the signature for compatibility with existing calls,
-    but are not used.
+    Uses BingX Perpetual Futures v2 endpoint:
+      DELETE /openApi/swap/v2/trade/allOpenOrders
     """
     sym = symbol.upper()
-    payload = {
-        "symbol": sym,
-    }
-
-    print("[CANCEL] Canceling ALL open orders for %s with payload: %s" % (sym, payload))
+    payload = {"symbol": sym}
+    print(f"[CANCEL] Canceling ALL open orders for {sym} with payload: {payload}")
 
     resp = await bingx_api_request(
-        "POST",
+        "DELETE",
         "/openApi/swap/v2/trade/allOpenOrders",
         client["api_key"],
         client["secret_key"],
         params=payload,
     )
 
-    print("[CANCEL] RESPONSE: %s" % resp)
+    print(f"[CANCEL] RESPONSE: {resp}")
     return resp
 
 
-
-async def _close_position_market(client, symbol, direction, qty):
+async def _close_position_market(client, symbol: str, direction: str, qty: float):
     """
     Close an existing position at market for a given size.
     direction: 'LONG'/'SHORT' for the *original* position direction.
@@ -274,12 +183,12 @@ async def _close_position_market(client, symbol, direction, qty):
     payload = {
         "symbol": symbol,
         "side": close_side,
-        "positionSide": "BOTH",
+        "positionSide": "BOTH",  # one-way mode
         "type": "MARKET",
         "quantity": qty_str,
         "workingType": "MARK_PRICE",
     }
-    print("[CLOSE] Closing partial position at MARKET: %s" % payload)
+    print(f"[CLOSE] Closing partial position at MARKET: {payload}")
     resp = await bingx_api_request(
         "POST",
         "/openApi/swap/v2/trade/order",
@@ -287,76 +196,69 @@ async def _close_position_market(client, symbol, direction, qty):
         client["secret_key"],
         params=payload,
     )
-    print("[CLOSE] RESPONSE: %s" % resp)
+    print(f"[CLOSE] RESPONSE: {resp}")
     return resp
 
-
-# -------------------------------------------------------------------
-# Main trade execution
-# -------------------------------------------------------------------
 
 async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, dry_run=False):
     """
     Execute a trade based on a Telegram signal.
 
-    - Uses MARKET or LIMIT based on config["order_type"].
     - LIMIT:
-        * place limit entry
-        * hybrid wait (order status + position size) up to timeout
-        * if not filled enough: cancel order, close any partial at market, stop.
-        * if filled enough: place TP/SL/trailing normally.
+        * if entry response is already FILLED → use executedQty and
+          immediately place TP/SL/trailing (NO waiting, NO cancel).
+        * otherwise: place limit entry, hybrid wait up to timeout;
+          if not filled enough → cancel & close partial, then exit.
     - MARKET:
-        * place entry and then TP/SL/trailing immediately (no waiting).
+        * place entry and then TP/SL/trailing immediately.
     """
     if config is None:
         from config import get_config
         config = get_config()
 
-    # Symbol mapping from signal to BingX futures format
     raw_symbol = signal.get("symbol", "")
-    symbol = map_symbol(raw_symbol)
+    symbol = raw_symbol.replace("/", "-").upper()
 
     direction = str(signal.get("direction", "")).upper()  # LONG / SHORT
     entry = float(signal.get("entry", 0.0))
     targets = [float(t) for t in signal.get("targets", [])[:4]]
     stoploss = float(signal.get("stoploss", 0.0))
 
-    # Basic sanity checks
     if not symbol or entry <= 0 or not direction or not targets or stoploss <= 0:
         print(
             "[ERROR] Invalid signal in execute_trade: "
-            "raw_symbol=%r, mapped_symbol=%r, direction=%r, entry=%r, targets=%r, stoploss=%r"
-            % (raw_symbol, symbol, direction, entry, targets, stoploss)
+            f"raw_symbol={raw_symbol!r}, mapped_symbol={symbol!r}, "
+            f"direction={direction!r}, entry={entry!r}, "
+            f"targets={targets!r}, stoploss={stoploss!r}"
         )
         return
 
-    # Position size from USDT, leverage, entry
     qty = (usdt_amount * leverage) / entry
     qty_str = format_qty(qty)
 
     side = "BUY" if direction == "LONG" else "SELL"
     opposite = "SELL" if direction == "LONG" else "BUY"
 
-    # ENTRY ORDER TYPE from config
     order_type = str(config.get("order_type", "MARKET")).upper()
     if order_type not in ("MARKET", "LIMIT"):
         order_type = "MARKET"
 
-    # LIMIT fill behavior (defaults if not in config)
-    fill_threshold = float(config.get("limit_fill_threshold", 0.01))         # 1% default
-    fill_timeout = int(config.get("limit_fill_timeout_seconds", 180))        # 180s default
+    fill_threshold = float(config.get("limit_fill_threshold", 0.01))         # 1%
+    fill_timeout = int(config.get("limit_fill_timeout_seconds", 180))        # 180s
 
     print("======================================================================")
-    print("EXECUTING TRADE for %s" % symbol)
-    print("  Direction:   %s" % direction)
-    print("  Order type:  %s" % order_type)
-    print("  Entry:       %s" % entry)
-    print("  Qty (intended): %s (≈ %.4f USDT at %dx)" % (qty_str, usdt_amount, leverage))
-    print("  Targets:     %s" % targets)
-    print("  Stoploss:    %s" % stoploss)
+    print(f"EXECUTING TRADE for {symbol}")
+    print(f"  Direction:   {direction}")
+    print(f"  Order type:  {order_type}")
+    print(f"  Entry:       {entry}")
+    print(
+        f"  Qty (intended): {qty_str} (≈ {usdt_amount:.4f} USDT at {leverage}x)"
+    )
+    print(f"  Targets:     {targets}")
+    print(f"  Stoploss:    {stoploss}")
     print("======================================================================")
 
-    # ---------- ENTRY ORDER ----------
+    # ===== ENTRY ORDER =====
     entry_payload = {
         "symbol": symbol,
         "side": side,
@@ -370,7 +272,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         entry_payload["price"] = str(entry)
         entry_payload["timeInForce"] = "GTC"
 
-    print("ENTRY ORDER: %s" % entry_payload)
+    print(f"ENTRY ORDER: {entry_payload}")
 
     if dry_run or config.get("dry_run_mode", False):
         print("[DRY RUN] Skipping real entry order.")
@@ -383,21 +285,35 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         client["secret_key"],
         params=entry_payload,
     )
-    print("ENTRY RESPONSE: %s" % entry_resp)
+    print(f"ENTRY RESPONSE: {entry_resp}")
 
     if entry_resp.get("code") != 0:
-        print("[ENTRY ERROR] %s" % entry_resp.get("msg"))
+        print(f"[ENTRY ERROR] {entry_resp.get('msg')}")
         return
 
-    # Extract orderId (used for status & cancel)
     order_data = (entry_resp.get("data") or {}).get("order") or {}
     entry_order_id = order_data.get("orderId") or order_data.get("orderID")
+    status = str(order_data.get("status", "")).upper()
+    executed = order_data.get("executedQty")
 
-    # Decide effective quantity:
     effective_qty = qty
 
-    if order_type == "LIMIT":
-        # Hybrid wait for fill
+    # === NEW LOGIC: if LIMIT and already FILLED in response, trust it and SKIP waiting ===
+    if order_type == "LIMIT" and status == "FILLED":
+        try:
+            if executed is not None:
+                executed_f = float(executed)
+                if executed_f > 0:
+                    effective_qty = executed_f
+                    print(
+                        f"[INFO] LIMIT entry FILLED immediately, "
+                        f"using executedQty={executed_f:.6f} and placing TP/SL/trailing."
+                    )
+        except Exception:
+            print("[WARN] Could not parse executedQty, using intended qty.")
+
+    # Otherwise, use hybrid wait for LIMIT that is not yet filled
+    elif order_type == "LIMIT":
         filled_size = await _wait_for_fill_hybrid(
             client,
             symbol,
@@ -412,29 +328,22 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         if filled_size >= target_size and filled_size > 0:
             effective_qty = filled_size
             print(
-                "[INFO] LIMIT entry sufficiently filled: %.6f (>= %.6f)"
-                % (filled_size, target_size)
+                "[INFO] LIMIT entry sufficiently filled: "
+                f"{filled_size:.6f} (>= {target_size:.6f})"
             )
         else:
-            # Not filled enough within timeout: cancel order, close partial (if any), and stop
             print(
                 "[INFO] LIMIT entry NOT filled enough within timeout. "
-                "filled_size=%.6f, needed>=%.6f"
-                % (filled_size, target_size)
+                f"filled_size={filled_size:.6f}, needed>={target_size:.6f}"
             )
-            if entry_order_id is not None:
-                await _cancel_order(client, symbol, entry_order_id, side, order_type, "BOTH")
-
+            await _cancel_order(client, symbol)
             if filled_size > 0:
-                # Close any partial position at market for safety
                 await _close_position_market(client, symbol, direction, filled_size)
-
             print("[INFO] Exiting without placing TP/SL/trailing.")
             return
 
     else:
-        # MARKET entry: if API returned executedQty, we can use that as effective_qty
-        executed = order_data.get("executedQty")
+        # MARKET: if executedQty present, use it
         try:
             if executed is not None:
                 executed_f = float(executed)
@@ -444,9 +353,9 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
             pass
 
     eff_qty_str = format_qty(effective_qty)
-    print("[INFO] Using effective_qty=%s for exits." % eff_qty_str)
+    print(f"[INFO] Using effective_qty={eff_qty_str} for exits.")
 
-    # ---------- TAKE PROFITS ----------
+    # ===== TAKE PROFITS =====
     tp1_pct = float(config.get("tp1_close_percent", 35.0))
     tp2_pct = float(config.get("tp2_close_percent", 30.0))
     tp3_pct = float(config.get("tp3_close_percent", 20.0))
@@ -469,9 +378,10 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
             "quantity": tp_qty_str,
             "stopPrice": str(tp_price),
             "workingType": "MARK_PRICE",
+            # No reduceOnly in One-Way mode
         }
 
-        print("TP%d ORDER: %s" % (i, tp_payload))
+        print(f"TP{i} ORDER: {tp_payload}")
 
         tp_resp = await bingx_api_request(
             "POST",
@@ -480,9 +390,9 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
             client["secret_key"],
             params=tp_payload,
         )
-        print("TP%d RESPONSE: %s" % (i, tp_resp))
+        print(f"TP{i} RESPONSE: {tp_resp}")
 
-    # ---------- TRAILING STOP ----------
+    # ===== TRAILING STOP =====
     trail_tp_idx = int(config.get("trailing_activate_after_tp", 0))
     callback_rate = float(config.get("trailing_callback_rate", 0.0)) / 100.0
 
@@ -506,7 +416,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
                 "workingType": "MARK_PRICE",
             }
 
-            print("TRAILING STOP ORDER: %s" % trail_payload)
+            print(f"TRAILING STOP ORDER: {trail_payload}")
 
             trail_resp = await bingx_api_request(
                 "POST",
@@ -515,13 +425,13 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
                 client["secret_key"],
                 params=trail_payload,
             )
-            print("TRAILING STOP RESPONSE: %s" % trail_resp)
+            print(f"TRAILING STOP RESPONSE: {trail_resp}")
         else:
             print("[TRAILING] No remaining quantity for trailing stop.")
     else:
         print("[TRAILING] Trailing stop disabled or invalid config.")
 
-    # ---------- STOP LOSS ----------
+    # ===== STOP LOSS =====
     sl_payload = {
         "symbol": symbol,
         "side": opposite,
@@ -532,7 +442,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         "workingType": "MARK_PRICE",
     }
 
-    print("STOP LOSS ORDER: %s" % sl_payload)
+    print(f"STOP LOSS ORDER: {sl_payload}")
 
     sl_resp = await bingx_api_request(
         "POST",
@@ -541,9 +451,9 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         client["secret_key"],
         params=sl_payload,
     )
-    print("STOP LOSS RESPONSE: %s" % sl_resp)
+    print(f"STOP LOSS RESPONSE: {sl_resp}")
 
     print(
-        "REAL TRADE EXECUTED: %s %s %dx – $%.2f (order_type=%s)"
-        % (symbol, direction, leverage, usdt_amount, order_type)
+        f"REAL TRADE EXECUTED: {symbol} {direction} {leverage}x – "
+        f"${usdt_amount:.2f} (order_type={order_type})"
     )

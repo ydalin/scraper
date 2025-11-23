@@ -43,7 +43,7 @@ async def bingx_api_request(
     """
     Unified BingX API request used by main.py and trade.py.
 
-    method: "GET" or "POST"
+    method: "GET", "POST" or "DELETE"
     path:   e.g. "/openApi/swap/v2/trade/order"
     params: dict of parameters (symbol, side, quantity, ...)
 
@@ -65,6 +65,8 @@ async def bingx_api_request(
 
             if method == "GET":
                 resp = requests.get(url, headers=headers, timeout=10)
+            elif method == "DELETE":
+                resp = requests.delete(url, headers=headers, timeout=10)
             else:
                 # For BingX, sending params only in query is usually enough.
                 # We keep body empty (or could also send the same params dict).
