@@ -1,4 +1,4 @@
-# trade.py – LIMIT entry with timeout + cancel + TP/SL/trailing
+# trade.py – LIMIT entry with timeout + TP LIMIT + SL + trailing-on-TP
 import asyncio
 import time
 from api import bingx_api_request
@@ -145,7 +145,7 @@ async def _wait_for_fill_hybrid(
     return last_size
 
 
-async def _cancel_order(client, symbol: str):
+async def _cancel_all_orders_for_symbol(client, symbol: str):
     """
     Cancel ALL open orders for a given symbol.
 
@@ -206,18 +206,18 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
 
     - LIMIT:
         * if entry response is already FILLED → use executedQty and
-          immediately place TP/SL/trailing (NO waiting, NO cancel).
+          immediately place TP LIMIT / SL / trailing (NO waiting, NO cancel).
         * otherwise: place limit entry, hybrid wait up to timeout;
           if not filled enough → cancel & close partial, then exit.
     - MARKET:
-        * place entry and then TP/SL/trailing immediately.
+        * place entry and then TP LIMIT / SL / trailing immediately.
     """
     if config is None:
         from config import get_config
         config = get_config()
 
     raw_symbol = signal.get("symbol", "")
-    symbol = raw_symbol.replace("/", "-").upper()
+    symbol = raw_symbol.upper().replace("/", "-")
 
     direction = str(signal.get("direction", "")).upper()  # LONG / SHORT
     entry = float(signal.get("entry", 0.0))
@@ -298,7 +298,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
 
     effective_qty = qty
 
-    # === NEW LOGIC: if LIMIT and already FILLED in response, trust it and SKIP waiting ===
+    # If LIMIT and already FILLED in response, trust executedQty and skip waiting
     if order_type == "LIMIT" and status == "FILLED":
         try:
             if executed is not None:
@@ -336,7 +336,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
                 "[INFO] LIMIT entry NOT filled enough within timeout. "
                 f"filled_size={filled_size:.6f}, needed>={target_size:.6f}"
             )
-            await _cancel_order(client, symbol)
+            await _cancel_all_orders_for_symbol(client, symbol)
             if filled_size > 0:
                 await _close_position_market(client, symbol, direction, filled_size)
             print("[INFO] Exiting without placing TP/SL/trailing.")
@@ -355,7 +355,7 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
     eff_qty_str = format_qty(effective_qty)
     print(f"[INFO] Using effective_qty={eff_qty_str} for exits.")
 
-    # ===== TAKE PROFITS =====
+    # ===== TAKE PROFITS (LIMIT CONDITIONALS) =====
     tp1_pct = float(config.get("tp1_close_percent", 35.0))
     tp2_pct = float(config.get("tp2_close_percent", 30.0))
     tp3_pct = float(config.get("tp3_close_percent", 20.0))
@@ -370,15 +370,16 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         tp_qty = effective_qty * (tp_pct / 100.0)
         tp_qty_str = format_qty(tp_qty)
 
+        # TAKE_PROFIT = conditional LIMIT
         tp_payload = {
             "symbol": symbol,
             "side": opposite,
             "positionSide": "BOTH",
-            "type": "TAKE_PROFIT_MARKET",
+            "type": "TAKE_PROFIT",
             "quantity": tp_qty_str,
-            "stopPrice": str(tp_price),
+            "price": str(tp_price),       # limit price
+            "stopPrice": str(tp_price),   # trigger
             "workingType": "MARK_PRICE",
-            # No reduceOnly in One-Way mode
         }
 
         print(f"TP{i} ORDER: {tp_payload}")
@@ -392,42 +393,37 @@ async def execute_trade(client, signal, usdt_amount, leverage=10, config=None, d
         )
         print(f"TP{i} RESPONSE: {tp_resp}")
 
-    # ===== TRAILING STOP =====
+    # ===== TRAILING STOP (SLIDING) – sell EVERYTHING when activated =====
     trail_tp_idx = int(config.get("trailing_activate_after_tp", 0))
     callback_rate = float(config.get("trailing_callback_rate", 0.0)) / 100.0
 
     if 1 <= trail_tp_idx <= len(targets) and callback_rate > 0:
-        used_pct = tp1_pct + tp2_pct + tp3_pct + tp4_pct
-        remain_pct = max(0.0, 100.0 - used_pct)
+        # NEW: trailing uses the FULL effective position size
+        trail_qty = effective_qty
+        trail_qty_str = format_qty(trail_qty)
+        activation_price = targets[trail_tp_idx - 1]
 
-        if remain_pct > 0:
-            trail_qty = effective_qty * (remain_pct / 100.0)
-            trail_qty_str = format_qty(trail_qty)
-            activation_price = targets[trail_tp_idx - 1]
+        trail_payload = {
+            "symbol": symbol,
+            "side": opposite,
+            "positionSide": "BOTH",
+            "type": "TRAILING_STOP_MARKET",
+            "quantity": trail_qty_str,         # <-- sell entire position
+            "activationPrice": str(activation_price),
+            "callbackRate": str(callback_rate),
+            "workingType": "MARK_PRICE",
+        }
 
-            trail_payload = {
-                "symbol": symbol,
-                "side": opposite,
-                "positionSide": "BOTH",
-                "type": "TRAILING_STOP_MARKET",
-                "quantity": trail_qty_str,
-                "activationPrice": str(activation_price),
-                "callbackRate": str(callback_rate),
-                "workingType": "MARK_PRICE",
-            }
+        print(f"TRAILING STOP ORDER: {trail_payload}")
 
-            print(f"TRAILING STOP ORDER: {trail_payload}")
-
-            trail_resp = await bingx_api_request(
-                "POST",
-                "/openApi/swap/v2/trade/order",
-                client["api_key"],
-                client["secret_key"],
-                params=trail_payload,
-            )
-            print(f"TRAILING STOP RESPONSE: {trail_resp}")
-        else:
-            print("[TRAILING] No remaining quantity for trailing stop.")
+        trail_resp = await bingx_api_request(
+            "POST",
+            "/openApi/swap/v2/trade/order",
+            client["api_key"],
+            client["secret_key"],
+            params=trail_payload,
+        )
+        print(f"TRAILING STOP RESPONSE: {trail_resp}")
     else:
         print("[TRAILING] Trailing stop disabled or invalid config.")
 
